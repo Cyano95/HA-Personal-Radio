@@ -42,7 +42,11 @@ PCM_CHUNK       = 65_536    # ffmpeg decoder read chunk
 STREAM_CHUNK    = 8_192     # HTTP broadcast chunk size
 
 # How many seconds we allow ahead of realtime when feeding the encoder.
-REALTIME_AHEAD  = 0.3
+# 1.5 s Vorlauf überbrückt kurze Event-Loop-Verzögerungen (Datei-I/O,
+# yt-dlp-Resolves), die sonst als kurzes Stocken hörbar wurden. Größerer
+# Vorlauf würde Skip/Prev spürbar verzögern (bereits gesendetes Audio
+# spielt beim Client erst zu Ende).
+REALTIME_AHEAD  = 1.5
 
 # Burst-on-connect: how many bytes of recent audio to send to new subscribers
 # so VLC (and other strict clients) can find a valid MP3 sync frame quickly.
@@ -349,7 +353,7 @@ class UserStream:
                     prefetched_pcm  = None
 
                 if _cb_ensure_queue:
-                    await _cb_ensure_queue(self.uid, count=3)
+                    await _cb_ensure_queue(self.uid, count=1)
 
                 # ── Get current song + PCM ─────────────────────────────────
                 if prefetched_song is not None and prefetched_pcm is not None:
@@ -424,7 +428,7 @@ class UserStream:
                 if _cb_advance_queue:
                     await _cb_advance_queue(self.uid, song)
                 if _cb_ensure_queue:
-                    asyncio.create_task(_cb_ensure_queue(self.uid, count=3))
+                    asyncio.create_task(_cb_ensure_queue(self.uid, count=1))
 
                 next_song   = (_cb_get_current_song(self.uid)
                                if _cb_get_current_song else None)

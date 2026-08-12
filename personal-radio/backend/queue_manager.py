@@ -228,8 +228,11 @@ async def _build_next_song_entry(uid: str, station: str) -> dict | None:
     """
     pool = storage.read_station_pool(station)
 
+    loop = asyncio.get_running_loop()
     for _ in range(min(5, max(1, len(pool)))):
-        entry = _pick_song(uid, station)
+        # _pick_song liest die (potentiell großen) Pool-Dateien synchron —
+        # im Executor, damit der Audio-Producer nicht blockiert (Stottern).
+        entry = await loop.run_in_executor(None, _pick_song, uid, station)
         if not entry:
             return None
 
@@ -266,7 +269,7 @@ async def _build_next_song_entry(uid: str, station: str) -> dict | None:
     return None
 
 
-async def ensure_queue_has_entries(uid: str, count: int = 3) -> None:
+async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
     """Ensure at least *count* songs after current_index are queued."""
     async with get_user_lock(uid):
         state    = storage.read_user_state(uid)
@@ -333,7 +336,7 @@ async def apply_station_change(uid: str) -> None:
 
     # Queue im Hintergrund mit der neuen Auswahl auffüllen
     # (nicht innerhalb des Locks — ensure_queue_has_entries lockt selbst).
-    await ensure_queue_has_entries(uid, count=3)
+    await ensure_queue_has_entries(uid, count=1)
 
 
 def _same_song(a: dict | None, b: dict | None) -> bool:

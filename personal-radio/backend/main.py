@@ -165,8 +165,8 @@ class PlaybackEngine:
                     state = storage.read_user_state(uid)
                     state["is_playing"] = True
                     storage.write_user_state(uid, state)
-                # Fill queue and prefetch in background
-                asyncio.create_task(ensure_queue_has_entries(uid, count=5))
+                # Genau einen Song im Voraus bereithalten
+                asyncio.create_task(ensure_queue_has_entries(uid, count=1))
                 asyncio.create_task(self._prefetch(uid))
             return ok
 
@@ -484,25 +484,49 @@ async def _run_icy_server(port: int) -> None:
 # REST API
 # ---------------------------------------------------------------------------
 
+# Songanzahl pro Sender wird nach Datei-mtime gecacht — die Pools können
+# mehrere MB groß sein und dürfen NICHT bei jedem UI-Poll synchron im
+# Event-Loop geparst werden (das ließ die Wiedergabe kurz stocken).
+_station_count_cache: dict[str, tuple[float, int]] = {}
+
+
+def _list_stations_sync() -> list[dict]:
+    cursors = storage.read_cursors()
+    result  = []
+    for f in sorted(storage.STATIONS_DIR.glob("*.json")):
+        try:
+            mtime  = f.stat().st_mtime
+            cached = _station_count_cache.get(f.stem)
+            if cached and cached[0] == mtime:
+                count = cached[1]
+            else:
+                count = len(storage.read_station_pool(f.stem))
+                _station_count_cache[f.stem] = (mtime, count)
+            result.append({
+                "station":     f.stem,
+                "song_count":  count,
+                "cursor":      cursors.get(f.stem, 0),
+                "modified_at": mtime,
+            })
+        except OSError:
+            continue
+    return result
+
+
 @app.get("/api/stations")
 async def api_stations(request: Request):
     uid = require_user(request)
-    cursors = storage.read_cursors()
-    result = []
     try:
         if not storage.STATIONS_DIR.exists():
             return []
-        for f in sorted(storage.STATIONS_DIR.glob("*.json")):
-            pool = storage.read_station_pool(f.stem)
-            result.append({
-                "station":     f.stem,
-                "song_count":  len(pool),
-                "cursor":      cursors.get(f.stem, 0),
-                "modified_at": f.stat().st_mtime,
-            })
+        # Im Thread-Executor: blockiert den Event-Loop (und damit den
+        # Audio-Producer) nicht.
+        return await asyncio.get_running_loop().run_in_executor(
+            None, _list_stations_sync
+        )
     except Exception as e:
         logger.exception("Error reading stations: %s", e)
-    return result
+        return []
 
 
 @app.get("/api/debug")
@@ -611,11 +635,25 @@ async def api_nowplaying(request: Request):
 
     entity_id   = state.get("player_entity_id")
     player_name = entity_id
+    volume      = state.get("volume")
     if entity_id:
-        for p in await get_media_players():
-            if p["entity_id"] == entity_id:
-                player_name = p["name"]
-                break
+        # Parallel abfragen, damit die Antwortzeit niedrig bleibt (Boot/Polling)
+        players, pstate = await asyncio.gather(
+            get_media_players(),
+            get_player_state(entity_id),
+            return_exceptions=True,
+        )
+        if isinstance(players, list):
+            for p in players:
+                if p["entity_id"] == entity_id:
+                    player_name = p["name"]
+                    break
+        # Tatsächliche Lautstärke des Players — spiegelt auch externe
+        # Änderungen (HA-UI, Fernbedienung, andere Apps) wider.
+        if isinstance(pstate, dict):
+            vl = (pstate.get("attributes") or {}).get("volume_level")
+            if isinstance(vl, (int, float)):
+                volume = float(vl)
 
     return {
         "artist":           song.get("artist")    if song else None,
@@ -626,6 +664,8 @@ async def api_nowplaying(request: Request):
         "player_entity_id": entity_id,
         "player_name":      player_name,
         "is_playing":       state.get("is_playing", False),
+        # Live-Lautstärke des Players (None, wenn nicht ermittelbar)
+        "volume":           volume,
         # Zählt jeden Song-Start hoch — die UI erkennt daran auch den Wechsel
         # auf denselben Titel (oder einen Neustart des aktuellen Titels).
         "seq":              (stream.song_seq if stream and not stream.stopped else 0),

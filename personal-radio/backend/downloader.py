@@ -332,7 +332,7 @@ async def get_audio_source(artist: str, song: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 async def prefetch_for_user(uid: str, queue: list[dict], current_index: int) -> None:
-    """Pre-resolve stream URLs for the next 2 songs so skip feels instant."""
+    """Pre-resolve the stream URL for the NEXT song only (one song ahead)."""
     lock_file = storage.user_dir(uid) / "prefetch.lock"
     if lock_file.exists():
         try:
@@ -345,7 +345,7 @@ async def prefetch_for_user(uid: str, queue: list[dict], current_index: int) -> 
         lock_file.write_text(str(time.time()))
         try:
             for i in range(current_index + 1,
-                           min(current_index + 3, len(queue))):
+                           min(current_index + 2, len(queue))):
                 item = queue[i]
                 result = await resolve_song(item["artist"], item["song"])
                 if result:

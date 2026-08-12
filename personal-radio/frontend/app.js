@@ -30,6 +30,8 @@ const S = {
   pending:   null,    // 'play'|'stop'|'skip'|'prev'|null
   optPlay:   null,    // null = use server; true/false = optimistic override
   abortWait: false,   // Stop während laufendem Skip/Prev → Wartephase abbrechen
+  volTouchedAt: 0,    // letzte eigene Lautstärke-Eingabe (Regler nicht überschreiben)
+  volDragging:  false,
   search:    '',
   volTimer:  null,
   pollTimer: null,
@@ -115,6 +117,12 @@ function renderPlayer() {
     D.trackArtist.textContent = now.artist;
     D.stationChip.textContent = now.station || '';
     D.playerLabel.textContent = now.player_name || now.player_entity_id || '';
+  } else if (S.now === null) {
+    // Noch keine Antwort vom Server — nicht fälschlich "Bereit" zeigen
+    D.trackTitle.textContent  = 'Verbinde…';
+    D.trackArtist.textContent = '';
+    D.stationChip.textContent = '';
+    D.playerLabel.textContent = '';
   } else {
     D.trackTitle.textContent  = isPlaying ? 'Lädt…' : 'Bereit';
     D.trackArtist.textContent = isPlaying ? '' : 'Sender auswählen und Play drücken';
@@ -149,9 +157,13 @@ function renderPlayer() {
   D.btnSkip.disabled = !isPlaying || S.pending !== null;
   D.btnPrev.disabled = !isPlaying || S.pending !== null;
 
-  // Volume
-  const vol = S.userState?.volume ?? 0.7;
-  if (document.activeElement !== D.volSlider) {
+  // Volume — Live-Wert des Players bevorzugen (externe Änderungen via HA,
+  // Fernbedienung etc.). Kurz nach eigener Eingabe nicht überschreiben,
+  // damit der Regler beim Ziehen nicht zurückspringt.
+  let vol = S.userState?.volume ?? 0.7;
+  if (typeof S.now?.volume === 'number') vol = S.now.volume;
+  const recentlyTouched = Date.now() - S.volTouchedAt < 2500;
+  if (!S.volDragging && !recentlyTouched) {
     D.volSlider.value = Math.round(vol * 100);
   }
 }
@@ -218,10 +230,21 @@ function renderStations() {
     return;
   }
 
-  // Sort: selected first, then alphabetical
+  // Recency-Rang aus der History: zuletzt gehörte Sender zuerst
+  const recentRank = new Map();
+  for (const h of S.history || []) {
+    if (h.station && !recentRank.has(h.station)) {
+      recentRank.set(h.station, recentRank.size);
+    }
+  }
+
+  // Sort: selected first, then recently played, then alphabetical
   list.sort((a, b) => {
     const as = selected.has(a.station), bs = selected.has(b.station);
     if (as !== bs) return as ? -1 : 1;
+    const ra = recentRank.has(a.station) ? recentRank.get(a.station) : Infinity;
+    const rb = recentRank.has(b.station) ? recentRank.get(b.station) : Infinity;
+    if (ra !== rb) return ra - rb;
     return formatStationName(a.station).localeCompare(formatStationName(b.station), 'de');
   });
 
@@ -426,10 +449,12 @@ async function selectPlayer(entityId) {
 
 let _volDebounce = null;
 function onVolumeChange(val) {
+  S.volTouchedAt = Date.now();
   clearTimeout(_volDebounce);
   _volDebounce = setTimeout(async () => {
     await api('api/user/state', 'POST', { volume: val / 100 });
     if (S.userState) S.userState.volume = val / 100;
+    if (S.now) S.now.volume = val / 100;
   }, 400);
 }
 
@@ -466,6 +491,10 @@ async function pollStations() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+  // Spielzustand SOFORT holen und rendern — der Rest lädt parallel nach.
+  // So zeigt die UI beim Öffnen ohne Umweg den echten Zustand statt "Bereit".
+  pollNow();
+
   // Load stations separately (can be slow)
   pollStations();
 
@@ -494,6 +523,9 @@ D.btnSkip.addEventListener('click', pressSkip);
 D.btnPrev.addEventListener('click', pressPrev);
 
 D.volSlider.addEventListener('input', e => onVolumeChange(+e.target.value));
+D.volSlider.addEventListener('pointerdown', () => { S.volDragging = true; });
+D.volSlider.addEventListener('pointerup',   () => { S.volDragging = false; S.volTouchedAt = Date.now(); });
+D.volSlider.addEventListener('pointercancel', () => { S.volDragging = false; });
 
 D.playerSelect.addEventListener('change', e => selectPlayer(e.target.value));
 

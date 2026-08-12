@@ -104,7 +104,7 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
                                          HA media_player entity
 ```
 
-- Songs are pre-resolved 2 tracks ahead of the current position.
+- Es wird immer genau **ein** Song im Voraus vorbereitet (aufgelöst und während des laufenden Titels vordekodiert für den Crossfade).
 - Es gibt genau **eine Instanz** (Queue, History, Media-Token) — keine Benutzertrennung.
 - Die Station-Log-API wird **1x pro Stunde** komplett abgefragt; läuft der Player, werden die gerade abgespielten Sender zusätzlich **1x pro Minute** abgefragt.
 - Rotation: mit `no_repeat_hours: 0` wird ein Song erst wiederholt, wenn alle Titel des Senders gespielt wurden. Mit einem Wert > 0 wird ein Song innerhalb dieser Spanne (Wanduhrzeit) nicht wiederholt — außer alle Titel wurden bereits gespielt, dann darf früher wiederholt werden.
