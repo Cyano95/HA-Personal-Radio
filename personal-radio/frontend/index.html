@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Personal Radio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="static/style.css" />
+</head>
+<body>
+<div id="app">
+
+  <header id="topbar">
+    <div id="topbar-left">
+      <svg class="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
+        <path d="M12 9a6 6 0 0 1 6 6"/><path d="M12 6a9 9 0 0 1 9 9"/>
+      </svg>
+      <span id="topbar-title">Personal Radio</span>
+    </div>
+    <div id="topbar-right">
+      <select id="player-select" aria-label="Media player"></select>
+      <div id="status-dot" title="Status"></div>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- Player Card -->
+    <div class="ha-card" id="player-card">
+      <div id="player-bg"></div>
+      <div id="player-content">
+        <div id="art-wrap">
+          <img id="art-img" src="" alt="Album Art" />
+          <div id="art-placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+              <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
+              <path d="M12 9a6 6 0 0 1 6 6"/><path d="M12 6a9 9 0 0 1 9 9"/>
+            </svg>
+          </div>
+        </div>
+        <div id="track-info">
+          <div id="track-title">Bereit</div>
+          <div id="track-artist">Sender auswählen und Play drücken</div>
+          <div id="track-meta">
+            <span id="station-chip" class="chip"></span>
+            <span id="player-name-label"></span>
+          </div>
+        </div>
+        <div id="controls">
+          <button class="ctrl-btn" id="btn-prev" aria-label="Zurück" disabled>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+          </button>
+          <button class="ctrl-btn ctrl-main" id="btn-play" aria-label="Play/Stop">
+            <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+            <div class="btn-spinner" style="display:none"></div>
+          </button>
+          <button class="ctrl-btn" id="btn-skip" aria-label="Überspringen">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM14.5 6v12l8.5-6z"/></svg>
+          </button>
+        </div>
+        <div id="volume-row">
+          <svg class="vol-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+          <input type="range" id="volume-slider" min="0" max="100" value="70" aria-label="Lautstärke" />
+          <svg class="vol-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stations Card -->
+    <div class="ha-card" id="stations-card">
+      <div class="ha-card-header">
+        <span class="ha-card-title">Sender</span>
+        <span id="stations-count" class="ha-badge"></span>
+      </div>
+      <div id="selected-chips-row"><div id="selected-chips"></div></div>
+      <div id="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input type="search" id="station-search" placeholder="Sender suchen…" autocomplete="off" />
+      </div>
+      <div id="station-grid"></div>
+    </div>
+
+    <!-- History Card -->
+    <details class="ha-card" id="history-card">
+      <summary class="ha-card-header ha-card-header--summary">
+        <span class="ha-card-title">Zuletzt gespielt</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div id="history-list"></div>
+    </details>
+
+  </main>
+</div>
+
+<div id="toast-container" aria-live="polite"></div>
+<script src="static/app.js" type="module"></script>
+</body>
+</html>

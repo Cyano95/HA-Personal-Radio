@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Personal Radio einrichten",
+        "description": "Aktiviert das Personal Radio Sidebar-Panel für alle Home Assistant Benutzer.\n\nNach der Einrichtung erscheint Personal Radio in der Seitenleiste — auch für Nicht-Admins."
+      }
+    },
+    "abort": {
+      "already_configured": "Personal Radio ist bereits eingerichtet."
+    }
+  }
+}

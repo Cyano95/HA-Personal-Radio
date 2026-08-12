@@ -1,0 +1,67 @@
+name: "Personal Radio"
+description: "Personalized radio using your HA media players."
+version: "1.2.0"
+slug: personal-radio
+init: false
+
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+
+map:
+  - data:rw
+
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+
+options:
+  station_api_url: ""
+  station_api_token: ""
+  station_api_user: ""
+  fanart_api_key: ""
+  media_port: 8788
+  stream_port: 8789
+  media_host: ""
+  media_content_type: "music"
+  # Maximale Spieldauer eines Titels in Minuten — längere Titel werden
+  # nicht gespielt. 0 = unbegrenzt.
+  max_song_minutes: 0
+  # Spanne in Stunden, in der kein Titel doppelt gespielt wird
+  # (gilt pro Titel über alle Sender hinweg).
+  # 0 = erst wiederholen, wenn alle Titel des Senders gespielt wurden.
+  no_repeat_hours: 0
+
+schema:
+  station_api_url: str
+  station_api_token: str
+  station_api_user: str
+  fanart_api_key: str?
+  media_port: int
+  stream_port: int
+  media_host: str?
+  media_content_type: str?
+  max_song_minutes: int
+  no_repeat_hours: int
+
+ports:
+  # Web UI + REST API — direkt (außerhalb von HA / ohne Ingress) erreichbar
+  8787/tcp: 8787
+  8788/tcp: 8788
+  8789/tcp: 8789
+
+ports_description:
+  8787/tcp: "Web UI + REST API (direkter Zugriff außerhalb von HA)"
+  8788/tcp: "MP3-/Stream-Server (Browser)"
+  8789/tcp: "ICY-Stream-Server (Media-Player)"
+
+webui: "http://[HOST]:[PORT:8787]"
+
+ingress: true
+ingress_port: 8787
+panel_icon: mdi:radio
+panel_title: Personal Radio
+panel_admin: false   # Nicht-Admins dürfen die Ingress-URL nutzen
