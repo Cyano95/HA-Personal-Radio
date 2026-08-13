@@ -287,6 +287,24 @@ async def resolve_song(artist: str, song: str) -> dict | None:
         return new_entry
 
 
+async def invalidate_stream_url(artist: str, song: str) -> None:
+    """
+    Gecachte Stream-URL verwerfen (z.B. weil ffmpeg damit nichts oder nur
+    hängend liefert). Der nächste Zugriff resolved frisch; yt_id, Cover
+    und Dauer bleiben erhalten.
+    """
+    def _sync() -> None:
+        cache_key = storage.yt_cache_key(artist, song)
+        cache     = storage.read_yt_cache()
+        entry     = cache.get(cache_key)
+        if entry and entry.get("stream_url"):
+            entry["stream_url"]            = None
+            entry["stream_url_expires_at"] = 0
+            storage.write_yt_cache(cache)
+            logger.info("Stream-URL invalidiert: %s — %s", artist, song)
+    await asyncio.get_running_loop().run_in_executor(None, _sync)
+
+
 async def get_audio_source(artist: str, song: str) -> str | None:
     """
     Return the string path or URL the ffmpeg decoder should open.

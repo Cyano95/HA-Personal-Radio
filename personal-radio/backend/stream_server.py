@@ -53,6 +53,12 @@ REALTIME_AHEAD  = 1.5
 # ~2 s at 128 kbps = 32 000 bytes.
 BURST_BYTES = 32_768
 
+# Maximale Dauer eines Vordergrund-Decodes (Song wird gerade NICHT aus dem
+# Prefetch bedient). Gedrosselte/tote YouTube-URLs lassen ffmpeg sonst
+# beliebig lange hängen — währenddessen käme kein Audio und der ICY-Watchdog
+# (60 s Stille) würde die Verbindung kappen und den Stream beenden.
+FG_DECODE_TIMEOUT = 45.0
+
 # ── Global registry ──────────────────────────────────────────────────────────
 _streams: dict[str, "UserStream"] = {}
 _registry_lock: asyncio.Lock | None = None
@@ -286,6 +292,53 @@ class UserStream:
 
     # ── Rate-limited PCM writer ───────────────────────────────────────────
 
+    async def _decode_foreground(
+        self,
+        encoder: asyncio.subprocess.Process,
+        source: str,
+    ) -> bytes | None:
+        """
+        Song im Vordergrund dekodieren (kein Prefetch vorhanden) und dabei
+        den Stream mit Stille am Leben halten, damit ICY-Watchdog und Player
+        die Verbindung nicht wegen fehlender Bytes trennen.
+
+        Rückgabe: PCM | None (Skip/Stop) | b"" (Fehler/Timeout → Song
+        überspringen; die Stream-URL sollte invalidiert werden).
+        """
+        decode_t = asyncio.create_task(self._decode_pcm(source, self._skip_event))
+        silence  = bytes(BYTES_PER_SEC // 2)          # 0.5 s Stille
+        deadline = time.monotonic() + FG_DECODE_TIMEOUT
+        try:
+            while True:
+                try:
+                    # 0.5 s auf den Decoder warten …
+                    return await asyncio.wait_for(asyncio.shield(decode_t), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as exc:
+                    logger.warning("[%s] Decode error: %s", self.uid, exc)
+                    return b""
+                if self.stopped or self._skip_event.is_set():
+                    decode_t.cancel()
+                    return None
+                if time.monotonic() > deadline:
+                    logger.warning(
+                        "[%s] Foreground decode timed out after %.0fs — skipping song",
+                        self.uid, FG_DECODE_TIMEOUT,
+                    )
+                    decode_t.cancel()
+                    return b""
+                # … und solange ~Echtzeit-Stille schreiben (Keepalive)
+                if await self._write_pcm(encoder, silence):
+                    decode_t.cancel()
+                    return None
+        finally:
+            if decode_t.done() and not decode_t.cancelled():
+                # Exceptions des Decode-Tasks nicht unbeobachtet lassen
+                exc = decode_t.exception()
+                if exc:
+                    logger.warning("[%s] Decode error: %s", self.uid, exc)
+
     async def _write_pcm(
         self,
         encoder: asyncio.subprocess.Process,
@@ -382,7 +435,10 @@ class UserStream:
                     src_type = "file" if source_.startswith("/") else "url"
                     logger.info("[%s] Decoding (%s): %s — %s",
                                 self.uid, src_type, artist_, song_name_)
-                    song_pcm = await self._decode_pcm(source_, self._skip_event)
+                    # Mit Stille-Keepalive + Timeout: ein hängender ffmpeg
+                    # (gedrosselte/tote URL) darf nie mehr den ganzen Stream
+                    # verstummen lassen (→ ICY-Watchdog kappte sonst alles).
+                    song_pcm = await self._decode_foreground(encoder, source_)
 
                     if song_pcm is None or self._skip_event.is_set():
                         logger.info("[%s] Skipped during decode", self.uid)
@@ -392,6 +448,18 @@ class UserStream:
                         continue
 
                 if not song_pcm:
+                    # Decoder lieferte nichts (URL abgelaufen/tot/gedrosselt).
+                    # Bisher rückte dieser Pfad STILL weiter — jetzt loggen wir
+                    # und verwerfen die gecachte URL, damit der Titel beim
+                    # nächsten Versuch frisch aufgelöst wird.
+                    logger.warning("[%s] Decode returned no audio: %s — %s",
+                                   self.uid, song.get("artist", ""), song.get("song", ""))
+                    try:
+                        from .downloader import invalidate_stream_url
+                        await invalidate_stream_url(song.get("artist", ""),
+                                                    song.get("song", ""))
+                    except Exception:
+                        pass
                     if _cb_advance_queue:
                         await _cb_advance_queue(self.uid, song)
                     continue
@@ -477,6 +545,17 @@ class UserStream:
                         next_pcm = await asyncio.wait_for(prefetch_t, timeout=20.0)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         logger.warning("[%s] Prefetch timed out — no crossfade", self.uid)
+                        # Vermutlich tote/gedrosselte URL: sofort verwerfen,
+                        # damit der folgende Vordergrund-Decode frisch resolved
+                        # statt an derselben URL erneut zu hängen.
+                        if next_song:
+                            try:
+                                from .downloader import invalidate_stream_url
+                                await invalidate_stream_url(
+                                    next_song.get("artist", ""),
+                                    next_song.get("song", ""))
+                            except Exception:
+                                pass
 
                 # ── Write blend + hand off remainder ──────────────────────
                 if next_pcm and tail_pcm and not self._queue_dirty:
