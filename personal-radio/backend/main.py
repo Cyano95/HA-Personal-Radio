@@ -270,6 +270,12 @@ async def startup() -> None:
     except Exception:
         logger.exception("User-dir cleanup failed")
 
+    # Bestehende Pools einmalig von HTML-Entity-Fehlsplits bereinigen
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _migrate_pool_entities)
+    except Exception:
+        logger.exception("Pool entity migration failed")
+
     # Clear all queues on startup so songs are rebuilt from current station
     # selection. is_playing is also reset (stream can't survive a restart).
     if storage.USERS_DIR.exists():
@@ -325,6 +331,45 @@ def _active_stations() -> list[str]:
         return list(state.get("selected_stations", []))
     except Exception:
         return []
+
+
+def _migrate_pool_entities() -> None:
+    """
+    Einmalige Reparatur bestehender Sender-Pools: Alte Einträge wurden am
+    ersten Semikolon getrennt — auch wenn das mitten in einer HTML-Entity
+    lag ("Kool &amp; The Gang;…" → Artist "Kool &amp"). Wir setzen die
+    Original-Zeile aus Artist+";"+Titel wieder zusammen und parsen sie mit
+    dem korrigierten Parser (Unescape zuerst) neu. Für korrekt gespeicherte
+    Einträge ist das ein No-Op.
+    """
+    from .api_client import _parse_entry
+
+    marker = storage.CACHE_DIR / "pool_entities_migrated"
+    if marker.exists() or not storage.STATIONS_DIR.exists():
+        return
+    fixed = 0
+    for f in storage.STATIONS_DIR.glob("*.json"):
+        try:
+            pool    = storage.read_station_pool(f.stem)
+            changed = False
+            for e in pool:
+                artist, song = e.get("artist", ""), e.get("song", "")
+                if not artist or not song:
+                    continue
+                # "; " stellt das beim damaligen Split verlorene Leerzeichen
+                # hinter dem Entity-Semikolon wieder her ("Kool &amp| The …").
+                reparsed = _parse_entry(f"{artist}; {song}")
+                if reparsed and (reparsed["artist"] != artist or reparsed["song"] != song):
+                    e["artist"], e["song"] = reparsed["artist"], reparsed["song"]
+                    changed = True
+                    fixed  += 1
+            if changed:
+                storage.write_json(storage.station_pool_path(f.stem), pool)
+        except Exception:
+            logger.exception("Pool migration failed for '%s'", f.stem)
+    marker.write_text("1")
+    if fixed:
+        logger.info("Pool migration: %d Einträge von HTML-Entities/Fehlsplits bereinigt", fixed)
 
 
 async def _install_companion() -> None:

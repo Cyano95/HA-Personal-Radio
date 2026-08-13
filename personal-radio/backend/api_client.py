@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import time
@@ -35,6 +36,13 @@ def _parse_entry(raw: str) -> dict | None:
     line = raw.strip()
     if not line:
         return None
+
+    # ── HTML-Entities ZUERST auflösen ────────────────────────────────────
+    # Die API liefert HTML-escaped Zeilen (&amp;, &#039;, …). Das Semikolon
+    # in "&amp;" kollidierte mit dem Feldtrenner und zerlegte z.B.
+    # "Kool &amp; The Gang;Kool&#039;s Back Again" an der falschen Stelle.
+    # Nach dem Unescape bleiben nur echte Trenner-Semikolons übrig.
+    line = html.unescape(line)
 
     # ── Strip trailing ;unix_timestamp ───────────────────────────────────
     # Use rsplit so we only look at the very last semicolon-separated token.

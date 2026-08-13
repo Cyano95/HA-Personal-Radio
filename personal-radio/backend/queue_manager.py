@@ -47,7 +47,8 @@ def set_user_error(uid: str, msg: str | None) -> None:
 # Song selection — newest-first, duplicate-aware
 # ---------------------------------------------------------------------------
 
-def _pick_song(uid: str, station: str) -> dict | None:
+def _pick_song(uid: str, station: str,
+               exclude_ids: set[str] | None = None) -> dict | None:
     """
     Walk the station pool from NEWEST to OLDEST (reverse insertion order).
 
@@ -64,6 +65,7 @@ def _pick_song(uid: str, station: str) -> dict | None:
     if not pool:
         return None
 
+    exclude_ids = exclude_ids or set()
     cache       = storage.read_yt_cache()
     played      = storage.read_played_ids(uid, station)      # {yt_id: played_at}
     no_repeat_s = _no_repeat_seconds()
@@ -80,6 +82,10 @@ def _pick_song(uid: str, station: str) -> dict | None:
             if key in seen:
                 continue                               # earlier duplicate — skip
             seen.add(key)
+            if exclude_ids:
+                cached = cache.get(storage.yt_cache_key(entry["artist"], entry["song"]))
+                if cached and cached.get("yt_id") in exclude_ids:
+                    continue    # Titel läuft gerade / ist schon eingereiht
             if max_sec > 0:
                 cached = cache.get(storage.yt_cache_key(entry["artist"], entry["song"]))
                 dur    = (cached or {}).get("duration")
@@ -221,10 +227,14 @@ def unmark_unplayed(uid: str, entries: list[dict]) -> None:
 # Queue population
 # ---------------------------------------------------------------------------
 
-async def _build_next_song_entry(uid: str, station: str) -> dict | None:
+async def _build_next_song_entry(uid: str, station: str,
+                                 exclude_ids: set[str] | None = None) -> dict | None:
     """
     Pick and resolve the next song for a station.
     Tries up to 5 candidates per call to skip permanently-failed ones.
+    *exclude_ids*: yt_ids, die gerade laufen oder schon eingereiht sind —
+    verhindert, dass derselbe Titel direkt hintereinander kommt, wenn er
+    in mehreren ausgewählten Sendern vorkommt.
     """
     pool = storage.read_station_pool(station)
 
@@ -232,7 +242,10 @@ async def _build_next_song_entry(uid: str, station: str) -> dict | None:
     for _ in range(min(5, max(1, len(pool)))):
         # _pick_song liest die (potentiell großen) Pool-Dateien synchron —
         # im Executor, damit der Audio-Producer nicht blockiert (Stottern).
-        entry = await loop.run_in_executor(None, _pick_song, uid, station)
+        entry = await loop.run_in_executor(None, _pick_song, uid, station, exclude_ids)
+        if not entry and exclude_ids:
+            # Fallback: lieber wiederholen als Stille (z.B. Mini-Pools)
+            entry = await loop.run_in_executor(None, _pick_song, uid, station, None)
         if not entry:
             return None
 
@@ -287,12 +300,21 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
         station_idx = state.get("current_station_index", 0)
         all_failed  = True
 
+        # Titel, die gerade laufen oder schon eingereiht sind, nicht erneut
+        # einreihen (derselbe Song kann in mehreren Sender-Pools stehen).
+        exclude_ids = {
+            e.get("yt_id") for e in queue[max(0, current_index - 1):]
+            if e.get("yt_id")
+        }
+
         for _ in range(needed):
             station     = stations[station_idx % len(stations)]
             station_idx = (station_idx + 1) % len(stations)
-            item        = await _build_next_song_entry(uid, station)
+            item        = await _build_next_song_entry(uid, station, exclude_ids)
             if item:
                 queue.append(item)
+                if item.get("yt_id"):
+                    exclude_ids.add(item["yt_id"])
                 all_failed = False
             else:
                 logger.warning("[%s] No song available from '%s'", uid, station)
