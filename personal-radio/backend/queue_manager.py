@@ -274,6 +274,7 @@ async def _build_next_song_entry(uid: str, station: str,
                 "yt_id":     yt_id,
                 "thumbnail": result.get("thumbnail", ""),
                 "cover_url": result.get("cover_url", ""),
+                "duration":  result.get("duration"),
                 "station":   station,
                 "queued_at": int(time.time()),
             }

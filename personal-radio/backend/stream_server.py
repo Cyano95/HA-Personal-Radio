@@ -59,6 +59,15 @@ BURST_BYTES = 32_768
 # (60 s Stille) würde die Verbindung kappen und den Stream beenden.
 FG_DECODE_TIMEOUT = 45.0
 
+# Fällt die Takt-Uhr weiter als diese Spanne hinter Echtzeit zurück
+# (Skip, kurzer Stillstand), wird sie neu verankert statt aufzuholen.
+PACE_MAX_BEHIND = 2.0
+# Zeitbudgets für die übrigen Zwischen-Song-Phasen (Queue füllen kann einen
+# yt-dlp-Resolve enthalten, URL-Auflösung ebenso) — auch dort wird jetzt
+# Keepalive-Stille geschrieben, damit der Stream nie verstummt.
+QUEUE_FILL_TIMEOUT = 60.0
+RESOLVE_TIMEOUT    = 40.0
+
 # ── Global registry ──────────────────────────────────────────────────────────
 _streams: dict[str, "UserStream"] = {}
 _registry_lock: asyncio.Lock | None = None
@@ -77,6 +86,7 @@ _cb_advance_queue:    Callable | None = None
 _cb_ensure_queue:     Callable | None = None
 _cb_fire_event:       Callable | None = None
 _cb_mark_played:      Callable | None = None
+_cb_request_restart:  Callable | None = None
 
 
 def set_stream_callbacks(
@@ -85,14 +95,16 @@ def set_stream_callbacks(
     ensure_queue:     Callable,
     fire_event:       Callable,
     mark_played:      Callable | None = None,
+    request_restart:  Callable | None = None,
 ) -> None:
     global _cb_get_current_song, _cb_advance_queue, _cb_ensure_queue, \
-        _cb_fire_event, _cb_mark_played
+        _cb_fire_event, _cb_mark_played, _cb_request_restart
     _cb_get_current_song = get_current_song
     _cb_advance_queue    = advance_queue
     _cb_ensure_queue     = ensure_queue
     _cb_fire_event       = fire_event
     _cb_mark_played      = mark_played
+    _cb_request_restart  = request_restart
 
 
 # ── Public helpers ────────────────────────────────────────────────────────────
@@ -137,6 +149,15 @@ class UserStream:
 
         # Burst-on-connect ring buffer (recent encoded MP3 bytes)
         self._burst:       bytearray = bytearray()
+
+        # Globale Takt-Uhr über ALLE Schreibvorgänge (Body, Blend, Stille).
+        # Vorher startete jeder _write_pcm-Aufruf eine eigene Uhr und
+        # genehmigte sich 1.5 s Vorsprung — die Drift summierte sich
+        # unbegrenzt, ließ die Subscriber-Queue volllaufen und der Hörer
+        # wurde still entfernt (Musik stoppte ohne Logeintrag).
+        self._pace_base:   float | None = None   # monotonic-Anker
+        self._pace_bytes:  int   = 0             # PCM-Bytes seit Anker
+        self._lag_warn_at: float = 0.0           # rate-limit für Lag-Warnung
 
     # ── Listener management ───────────────────────────────────────────────
 
@@ -212,17 +233,31 @@ class UserStream:
                 del self._burst[:excess]
 
         async with self._subs_lock:
-            dead: list[asyncio.Queue] = []
             for q in list(self._subs):
                 try:
                     q.put_nowait(chunk)
                 except asyncio.QueueFull:
-                    dead.append(q)
-            for q in dead:
-                try:
-                    self._subs.remove(q)
-                except ValueError:
-                    pass
+                    # Der Hörer hinkt hinterher (z.B. WLAN-Aussetzer beim
+                    # Player). Vorher wurde er hier STILL entfernt — die
+                    # Musik verstummte ohne jeden Logeintrag und der Stream
+                    # erholte sich nie. Jetzt: ältesten Chunk verwerfen und
+                    # den neuen einreihen (Ring-Verhalten). Der Hörer
+                    # überspringt etwas Audio, bleibt aber verbunden.
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        q.put_nowait(chunk)
+                    except asyncio.QueueFull:
+                        pass
+                    now = time.monotonic()
+                    if now - self._lag_warn_at > 30:
+                        self._lag_warn_at = now
+                        logger.warning(
+                            "[%s] Listener lagging — dropping oldest audio "
+                            "to keep the stream alive", self.uid,
+                        )
 
     # ── FFmpeg helpers ────────────────────────────────────────────────────
 
@@ -292,52 +327,69 @@ class UserStream:
 
     # ── Rate-limited PCM writer ───────────────────────────────────────────
 
+    async def _await_with_keepalive(
+        self,
+        encoder: asyncio.subprocess.Process,
+        aw,
+        timeout: float,
+        label: str,
+    ) -> tuple:
+        """
+        *aw* ausführen und währenddessen den Stream mit Echtzeit-Stille am
+        Leben halten (ICY-Watchdog und Player trennen sonst bei fehlenden
+        Bytes). Deckt ALLE Zwischen-Song-Phasen ab: Queue füllen, URL
+        auflösen, Dekodieren.
+
+        Rückgabe: (result, status) mit status ∈ "ok" | "interrupted" |
+        "timeout" | "error".
+        """
+        task     = asyncio.ensure_future(aw)
+        silence  = bytes(BYTES_PER_SEC // 2)          # 0.5 s Stille
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                # 0.5 s auf das Ergebnis warten …
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+                return result, "ok"
+            except asyncio.TimeoutError:
+                pass
+            except Exception as exc:
+                logger.warning("[%s] %s failed: %s", self.uid, label, exc)
+                return None, "error"
+            if self.stopped or self._skip_event.is_set():
+                task.cancel()
+                return None, "interrupted"
+            if time.monotonic() > deadline:
+                logger.warning("[%s] %s timed out after %.0fs",
+                               self.uid, label, timeout)
+                task.cancel()
+                return None, "timeout"
+            # … und solange ~Echtzeit-Stille schreiben (Keepalive)
+            if await self._write_pcm(encoder, silence):
+                task.cancel()
+                return None, "interrupted"
+
     async def _decode_foreground(
         self,
         encoder: asyncio.subprocess.Process,
         source: str,
     ) -> bytes | None:
         """
-        Song im Vordergrund dekodieren (kein Prefetch vorhanden) und dabei
-        den Stream mit Stille am Leben halten, damit ICY-Watchdog und Player
-        die Verbindung nicht wegen fehlender Bytes trennen.
-
+        Song im Vordergrund dekodieren (kein Prefetch vorhanden).
         Rückgabe: PCM | None (Skip/Stop) | b"" (Fehler/Timeout → Song
         überspringen; die Stream-URL sollte invalidiert werden).
         """
-        decode_t = asyncio.create_task(self._decode_pcm(source, self._skip_event))
-        silence  = bytes(BYTES_PER_SEC // 2)          # 0.5 s Stille
-        deadline = time.monotonic() + FG_DECODE_TIMEOUT
-        try:
-            while True:
-                try:
-                    # 0.5 s auf den Decoder warten …
-                    return await asyncio.wait_for(asyncio.shield(decode_t), timeout=0.5)
-                except asyncio.TimeoutError:
-                    pass
-                except Exception as exc:
-                    logger.warning("[%s] Decode error: %s", self.uid, exc)
-                    return b""
-                if self.stopped or self._skip_event.is_set():
-                    decode_t.cancel()
-                    return None
-                if time.monotonic() > deadline:
-                    logger.warning(
-                        "[%s] Foreground decode timed out after %.0fs — skipping song",
-                        self.uid, FG_DECODE_TIMEOUT,
-                    )
-                    decode_t.cancel()
-                    return b""
-                # … und solange ~Echtzeit-Stille schreiben (Keepalive)
-                if await self._write_pcm(encoder, silence):
-                    decode_t.cancel()
-                    return None
-        finally:
-            if decode_t.done() and not decode_t.cancelled():
-                # Exceptions des Decode-Tasks nicht unbeobachtet lassen
-                exc = decode_t.exception()
-                if exc:
-                    logger.warning("[%s] Decode error: %s", self.uid, exc)
+        pcm, status = await self._await_with_keepalive(
+            encoder,
+            self._decode_pcm(source, self._skip_event),
+            FG_DECODE_TIMEOUT,
+            "Foreground decode",
+        )
+        if status == "ok":
+            return pcm
+        if status == "interrupted":
+            return None
+        return b""
 
     async def _write_pcm(
         self,
@@ -347,12 +399,16 @@ class UserStream:
         """
         Write *pcm* to encoder stdin at approx REALTIME speed.
         Returns True if interrupted by stop/skip.
+
+        Verwendet die GLOBALE Takt-Uhr der Stream-Instanz: der Vorsprung
+        gegenüber Echtzeit bleibt dauerhaft auf REALTIME_AHEAD begrenzt —
+        egal wie viele Einzelaufrufe (Body, Blend, Keepalive-Stille) erfolgen.
         """
         if not pcm:
             return False
         assert encoder.stdin is not None
-        t0            = time.monotonic()
-        bytes_written = 0
+        if self._pace_base is None:
+            self._pace_base = time.monotonic()
         for offset in range(0, len(pcm), PCM_CHUNK):
             if self.stopped or self._skip_event.is_set():
                 return True
@@ -364,12 +420,17 @@ class UserStream:
                 logger.warning("[%s] Encoder pipe broken", self.uid)
                 self.stopped = True
                 return True
-            bytes_written += len(chunk)
-            elapsed  = time.monotonic() - t0
-            expected = bytes_written / BYTES_PER_SEC
-            surplus  = expected - elapsed - REALTIME_AHEAD
-            if surplus > 0.05:
-                await asyncio.sleep(surplus)
+            self._pace_bytes += len(chunk)
+            now  = time.monotonic()
+            lead = self._pace_bytes / BYTES_PER_SEC - (now - self._pace_base)
+            if lead > REALTIME_AHEAD:
+                await asyncio.sleep(lead - REALTIME_AHEAD)
+            elif lead < -PACE_MAX_BEHIND:
+                # Nach Skip/Stillstand NICHT im Schnellvorlauf "aufholen"
+                # (würde die Queue fluten) — Uhr neu verankern.
+                self._pace_base  = now
+                self._pace_bytes = 0
+                await asyncio.sleep(0)
             else:
                 await asyncio.sleep(0)
         return False
@@ -406,7 +467,23 @@ class UserStream:
                     prefetched_pcm  = None
 
                 if _cb_ensure_queue:
-                    await _cb_ensure_queue(self.uid, count=1)
+                    if prefetched_song is not None and prefetched_pcm is not None:
+                        # Nahtloser Übergang steht bereit: Queue-Füllung im
+                        # Hintergrund — KEIN Keepalive-Await, das zwischen
+                        # Blend und Body des nächsten Songs Stille einfügen
+                        # würde.
+                        asyncio.create_task(_cb_ensure_queue(self.uid, count=1))
+                    else:
+                        # Kann einen yt-dlp-Resolve enthalten (5–30 s) — mit
+                        # Keepalive, damit der Stream währenddessen nicht verstummt.
+                        await self._await_with_keepalive(
+                            encoder, _cb_ensure_queue(self.uid, count=1),
+                            QUEUE_FILL_TIMEOUT, "Queue fill",
+                        )
+                        if self.stopped:
+                            break
+                        if self._skip_event.is_set():
+                            continue          # wird am Loop-Anfang neu geleert
 
                 # ── Get current song + PCM ─────────────────────────────────
                 if prefetched_song is not None and prefetched_pcm is not None:
@@ -418,13 +495,22 @@ class UserStream:
                     song = (_cb_get_current_song(self.uid)
                             if _cb_get_current_song else None)
                     if not song:
-                        await asyncio.sleep(2)
+                        # Leere Queue: 1 s Stille schreiben statt still zu
+                        # warten — sonst kappt der ICY-Watchdog nach 60 s.
+                        await self._write_pcm(encoder, bytes(BYTES_PER_SEC))
+                        await asyncio.sleep(1.0)
                         continue
 
                     from .downloader import get_audio_source as _get_src
                     artist_    = song.get("artist", "")
                     song_name_ = song.get("song", "")
-                    source_    = await _get_src(artist_, song_name_)
+                    # Auch der Resolve kann yt-dlp anwerfen → Keepalive.
+                    source_, src_status = await self._await_with_keepalive(
+                        encoder, _get_src(artist_, song_name_),
+                        RESOLVE_TIMEOUT, "Resolve",
+                    )
+                    if src_status == "interrupted":
+                        continue
                     if not source_:
                         logger.warning("[%s] Cannot resolve audio: %s — %s",
                                        self.uid, artist_, song_name_)
@@ -466,6 +552,29 @@ class UserStream:
 
                 self.current_song = song
                 self.song_seq    += 1
+
+                # ── Diagnose: wie viel Audio haben wir wirklich? ──────────
+                pcm_sec  = len(song_pcm) / BYTES_PER_SEC
+                exp_sec  = song.get("duration") or 0
+                logger.info(
+                    "[%s] Now playing: %s — %s (%.0fs PCM%s)",
+                    self.uid, song.get("artist", ""), song.get("song", ""),
+                    pcm_sec, f", erwartet ~{exp_sec}s" if exp_sec else "",
+                )
+                if exp_sec and pcm_sec < exp_sec * 0.8 - 5:
+                    # Download ist vermutlich mittendrin abgerissen — URL
+                    # verwerfen, damit der Titel nächstes Mal frisch resolved.
+                    logger.warning(
+                        "[%s] PCM deutlich kürzer als erwartet (%.0fs < %ds) — "
+                        "Download abgerissen? Stream-URL wird invalidiert",
+                        self.uid, pcm_sec, exp_sec,
+                    )
+                    try:
+                        from .downloader import invalidate_stream_url
+                        asyncio.create_task(invalidate_stream_url(
+                            song.get("artist", ""), song.get("song", "")))
+                    except Exception:
+                        pass
 
                 # Zeitstempel auf den tatsächlichen Abspielbeginn setzen
                 # (No-Repeat-Spanne zählt ab Wiedergabestart, nicht ab Queuing)
@@ -601,11 +710,27 @@ class UserStream:
 
     async def _relay_encoder(self, encoder: asyncio.subprocess.Process) -> None:
         assert encoder.stdout is not None
-        while True:
-            chunk = await encoder.stdout.read(STREAM_CHUNK)
-            if not chunk:
-                break
-            await self._broadcast(chunk)
+        try:
+            while True:
+                chunk = await encoder.stdout.read(STREAM_CHUNK)
+                if not chunk:
+                    break
+                await self._broadcast(chunk)
+            if not self.stopped:
+                logger.warning("[%s] Encoder output ended unexpectedly — stopping stream",
+                               self.uid)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[%s] Encoder relay crashed — stopping stream", self.uid)
+        finally:
+            # Stirbt der Relay, würde der Producer sonst LAUTLOS in
+            # encoder.stdin.drain() hängen (volle Pipe) — ohne Log, ohne
+            # Disconnect. Stattdessen: Stream sauber beenden und die
+            # ICY-Handler sofort aufwecken.
+            if not self.stopped:
+                self._force_stop()
+                await self._broadcast(None)
 
 
 # ── HTTP handlers ─────────────────────────────────────────────────────────────
