@@ -265,33 +265,75 @@ class UserStream:
     async def _decode_pcm(
         source: str,
         skip_event: asyncio.Event | None = None,
+        headers: dict | None = None,
     ) -> bytes | None:
         is_url = source.startswith("http://") or source.startswith("https://")
         cmd = ["ffmpeg", "-y"]
         if is_url:
             cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                     "-reconnect_delay_max", "5"]
+            # Dieselben Header wie beim yt-dlp-Resolve verwenden — YouTube
+            # lehnt Abrufe mit abweichendem User-Agent zunehmend mit 403 ab.
+            if headers:
+                ua = headers.get("User-Agent") or headers.get("user-agent")
+                if ua:
+                    cmd += ["-user_agent", ua]
+                other = "".join(
+                    f"{k}: {v}\r\n" for k, v in headers.items()
+                    if k.lower() != "user-agent" and v
+                )
+                if other:
+                    cmd += ["-headers", other]
         cmd += ["-i", source,
                 "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
                 "pipe:1"]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        assert proc.stdout is not None
+        assert proc.stdout is not None and proc.stderr is not None
+
+        # stderr nebenläufig einsammeln (begrenzt), sonst kann die Pipe
+        # volllaufen und ffmpeg blockieren. Bei leerem Ergebnis liefert das
+        # den GRUND (z.B. "403 Forbidden") ins Log statt Rätselraten.
+        err_tail = bytearray()
+
+        async def _drain_stderr() -> None:
+            while True:
+                data = await proc.stderr.read(1024)
+                if not data:
+                    break
+                err_tail.extend(data)
+                if len(err_tail) > 4096:
+                    del err_tail[: len(err_tail) - 4096]
+
+        err_task = asyncio.create_task(_drain_stderr())
+
         chunks: list[bytes] = []
         while True:
             if skip_event and skip_event.is_set():
                 proc.kill()
                 await proc.wait()
+                err_task.cancel()
                 return None
             chunk = await proc.stdout.read(PCM_CHUNK)
             if not chunk:
                 break
             chunks.append(chunk)
         await proc.wait()
-        return b"".join(chunks)
+        try:
+            await asyncio.wait_for(err_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            err_task.cancel()
+
+        data = b"".join(chunks)
+        if not data:
+            text  = err_tail.decode(errors="replace")
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            tail  = " | ".join(lines[-3:])[:400] if lines else "keine ffmpeg-Ausgabe"
+            logger.warning("ffmpeg decode failed: %s", tail)
+        return data
 
     @staticmethod
     async def _start_encoder() -> asyncio.subprocess.Process:
@@ -373,6 +415,7 @@ class UserStream:
         self,
         encoder: asyncio.subprocess.Process,
         source: str,
+        headers: dict | None = None,
     ) -> bytes | None:
         """
         Song im Vordergrund dekodieren (kein Prefetch vorhanden).
@@ -381,7 +424,7 @@ class UserStream:
         """
         pcm, status = await self._await_with_keepalive(
             encoder,
-            self._decode_pcm(source, self._skip_event),
+            self._decode_pcm(source, self._skip_event, headers),
             FG_DECODE_TIMEOUT,
             "Foreground decode",
         )
@@ -521,10 +564,13 @@ class UserStream:
                     src_type = "file" if source_.startswith("/") else "url"
                     logger.info("[%s] Decoding (%s): %s — %s",
                                 self.uid, src_type, artist_, song_name_)
+                    from .downloader import get_source_headers as _get_hdrs
+                    headers_ = (await _get_hdrs(artist_, song_name_)
+                                if src_type == "url" else None)
                     # Mit Stille-Keepalive + Timeout: ein hängender ffmpeg
                     # (gedrosselte/tote URL) darf nie mehr den ganzen Stream
                     # verstummen lassen (→ ICY-Watchdog kappte sonst alles).
-                    song_pcm = await self._decode_foreground(encoder, source_)
+                    song_pcm = await self._decode_foreground(encoder, source_, headers_)
 
                     if song_pcm is None or self._skip_event.is_set():
                         logger.info("[%s] Skipped during decode", self.uid)
@@ -615,11 +661,14 @@ class UserStream:
                 async def _prefetch_next(ns=next_song):
                     if not ns:
                         return None
-                    from .downloader import get_audio_source as _get_src
+                    from .downloader import (get_audio_source as _get_src,
+                                             get_source_headers as _get_hdrs)
                     src = await _get_src(ns.get("artist", ""), ns.get("song", ""))
                     if not src:
                         return None
-                    return await UserStream._decode_pcm(src, bg_skip)
+                    hdrs = (await _get_hdrs(ns.get("artist", ""), ns.get("song", ""))
+                            if src.startswith("http") else None)
+                    return await UserStream._decode_pcm(src, bg_skip, hdrs)
 
                 prefetch_t = (
                     asyncio.create_task(_prefetch_next())

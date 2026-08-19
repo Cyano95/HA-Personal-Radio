@@ -99,7 +99,8 @@ def _resolve_stream_url_sync(artist: str, song: str) -> dict | None:
                 return None
 
             # Prefer a direct URL on the entry; fall back to formats list
-            stream_url: str | None = entry.get("url")
+            stream_url:   str | None  = entry.get("url")
+            http_headers: dict | None = entry.get("http_headers")
             if not stream_url:
                 fmts = entry.get("formats") or []
                 # Audio-only first, then any with audio
@@ -112,10 +113,19 @@ def _resolve_stream_url_sync(artist: str, song: str) -> dict | None:
                 candidates = audio_only or all_audio
                 if candidates:
                     best = max(candidates, key=lambda f: f.get("abr") or 0)
-                    stream_url = best["url"]
+                    stream_url   = best["url"]
+                    http_headers = best.get("http_headers") or http_headers
 
             if not stream_url:
                 return None
+
+            # Nur unkritische Standard-Header übernehmen (kein Cookie o.ä.)
+            if http_headers:
+                http_headers = {
+                    k: v for k, v in http_headers.items()
+                    if k.lower() in ("user-agent", "accept", "accept-language",
+                                     "origin", "referer")
+                }
 
             return {
                 "yt_id":      entry["id"],
@@ -123,6 +133,7 @@ def _resolve_stream_url_sync(artist: str, song: str) -> dict | None:
                 "thumbnail":  entry.get("thumbnail", ""),
                 "duration":   entry.get("duration"),
                 "stream_url_expires_at": int(time.time()) + STREAM_URL_TTL,
+                "http_headers": http_headers or None,
             }
     except Exception as e:
         logger.debug("URL resolve failed for '%s — %s': %s", artist, song, e)
@@ -275,6 +286,7 @@ async def resolve_song(artist: str, song: str) -> dict | None:
             "song":                   song,
             "stream_url":             result["stream_url"],
             "stream_url_expires_at":  result["stream_url_expires_at"],
+            "http_headers":           result.get("http_headers"),
             "thumbnail":              result.get("thumbnail", ""),
             "cover_url":              cover_url,
             "duration":               result.get("duration"),
@@ -285,6 +297,19 @@ async def resolve_song(artist: str, song: str) -> dict | None:
         cache[cache_key] = new_entry
         await loop.run_in_executor(None, storage.write_yt_cache, cache)
         return new_entry
+
+
+async def get_source_headers(artist: str, song: str) -> dict | None:
+    """
+    HTTP-Header (v.a. User-Agent), mit denen yt-dlp die Stream-URL angefragt
+    hat. ffmpeg soll dieselben verwenden — YouTube prüft zunehmend, ob der
+    Abrufer zum Resolver passt, sonst gibt es 403.
+    """
+    loop  = asyncio.get_running_loop()
+    cache = await loop.run_in_executor(None, storage.read_yt_cache)
+    entry = cache.get(storage.yt_cache_key(artist, song))
+    headers = (entry or {}).get("http_headers")
+    return dict(headers) if isinstance(headers, dict) and headers else None
 
 
 async def invalidate_stream_url(artist: str, song: str) -> None:
