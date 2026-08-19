@@ -31,9 +31,11 @@ echo "[Personal Radio] media_port=${MEDIA_PORT}  stream_port=${STREAM_PORT}  hos
 # (Symptom: jeder Titel wird nach Sekunden übersprungen, Radio bleibt stumm).
 # Schlägt das Update fehl (z.B. offline), läuft die vorhandene Version weiter.
 echo "[Personal Radio] Aktualisiere yt-dlp…"
-# --pre + [default]: Nightly-Kanal, wie von yt-dlp bei YouTube-Breakages
-# empfohlen — Fixes landen dort Tage bis Wochen vor dem Stable-Release.
-if timeout 120 pip install --no-cache-dir --upgrade --pre --quiet "yt-dlp[default]" 2>/dev/null; then
+# Nightly-Kanal, wie von yt-dlp bei YouTube-Breakages empfohlen.
+# WICHTIG: nur das nackte Paket "yt-dlp" (ohne Extras) — yt-dlp hat
+# keine Pflicht-Abhängigkeiten, --pre kann so kein anderes Paket
+# (z.B. httpx) auf eine inkompatible Vorabversion ziehen.
+if timeout 120 pip install --no-cache-dir --upgrade --pre --quiet yt-dlp 2>/dev/null; then
     echo "[Personal Radio] yt-dlp aktuell: $(python3 -c 'import yt_dlp; print(yt_dlp.version.__version__)' 2>/dev/null || echo 'unbekannt')"
 else
     echo "[Personal Radio] yt-dlp-Update fehlgeschlagen — verwende vorhandene Version: $(python3 -c 'import yt_dlp; print(yt_dlp.version.__version__)' 2>/dev/null || echo 'unbekannt')"

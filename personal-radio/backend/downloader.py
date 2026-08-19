@@ -275,9 +275,15 @@ async def resolve_song(artist: str, song: str) -> dict | None:
             await loop.run_in_executor(None, storage.write_yt_cache, cache)
             return None
 
-        cover_url = await _fetch_cover_url(
-            artist, song, result.get("thumbnail", "")
-        )
+        # Cover ist reine Kosmetik — ein Fehler hier (Netz, API, Bibliothek)
+        # darf die Songauflösung NIE mitreißen.
+        try:
+            cover_url = await _fetch_cover_url(
+                artist, song, result.get("thumbnail", "")
+            )
+        except Exception as e:
+            logger.debug("Cover fetch failed for '%s — %s': %s", artist, song, e)
+            cover_url = result.get("thumbnail", "")
 
         new_entry: dict = {
             **(entry or {}),
