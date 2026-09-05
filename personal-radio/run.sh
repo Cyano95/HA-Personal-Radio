@@ -22,8 +22,11 @@ export STREAM_PORT="${STREAM_PORT:-8789}"
 export MEDIA_CONTENT_TYPE="${MEDIA_CONTENT_TYPE:-music}"
 export MAX_SONG_MINUTES="${MAX_SONG_MINUTES:-0}"
 export NO_REPEAT_HOURS="${NO_REPEAT_HOURS:-0}"
+# Boolean separat lesen: get_option macht aus false einen leeren String,
+# den der :- Default wieder auf "an" drehen würde.
+export ICY_METADATA="$(python3 -c "import json; print('1' if json.load(open('$OPTIONS')).get('icy_metadata', True) else '0')" 2>/dev/null || echo 1)"
 
-echo "[Personal Radio] media_port=${MEDIA_PORT}  stream_port=${STREAM_PORT}  host='${MEDIA_HOST:-auto}'  content_type='${MEDIA_CONTENT_TYPE}'  max_song_minutes=${MAX_SONG_MINUTES}  no_repeat_hours=${NO_REPEAT_HOURS}"
+echo "[Personal Radio] media_port=${MEDIA_PORT}  stream_port=${STREAM_PORT}  host='${MEDIA_HOST:-auto}'  content_type='${MEDIA_CONTENT_TYPE}'  max_song_minutes=${MAX_SONG_MINUTES}  no_repeat_hours=${NO_REPEAT_HOURS}  icy_metadata=${ICY_METADATA}"
 
 # ── yt-dlp bei jedem Start aktualisieren ──────────────────────────────────
 # YouTube ändert regelmäßig seine URL-Signaturen; eine veraltete yt-dlp-

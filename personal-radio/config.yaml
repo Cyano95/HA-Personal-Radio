@@ -1,6 +1,6 @@
 name: "Personal Radio"
 description: "Personalized radio using your HA media players."
-version: "1.5.0"
+version: "1.6.0"
 slug: personal-radio
 init: false
 
@@ -34,6 +34,10 @@ options:
   # (gilt pro Titel über alle Sender hinweg).
   # 0 = erst wiederholen, wenn alle Titel des Senders gespielt wurden.
   no_repeat_hours: 0
+  # ICY-Titelmetadaten in den Stream einbetten (nur für Clients, die sie mit
+  # "Icy-MetaData: 1" anfordern — dann zeigt z.B. ein Internetradio den Titel
+  # im Display). Auf false stellen, falls ein Gerät damit nicht klarkommt.
+  icy_metadata: true
 
 schema:
   station_api_url: str
@@ -46,6 +50,7 @@ schema:
   media_content_type: str?
   max_song_minutes: int
   no_repeat_hours: int
+  icy_metadata: bool?
 
 ports:
   # Web UI + REST API — direkt (außerhalb von HA / ohne Ingress) erreichbar

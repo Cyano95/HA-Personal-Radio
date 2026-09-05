@@ -422,10 +422,20 @@ class UserStream:
     async def _start_encoder() -> asyncio.subprocess.Process:
         return await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
+            # Rohes PCM ist durch -f/-ar/-ac vollständig beschrieben — ohne
+            # diese beiden Optionen liest ffmpeg erst ~5 s Audio zur
+            # Formatanalyse ein, bevor überhaupt das erste MP3-Byte
+            # herauskommt (gemessen: 2,96 s → 0,00 s). Genau diese Stille
+            # am Anfang lässt Hardware-Radios abbrechen.
+            "-probesize", "32", "-analyzeduration", "0",
             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
             "-i", "pipe:0",
             "-f", "mp3", "-b:a", ENCODE_BITRATE,
             "-write_xing", "0",
+            # Jedes fertige MP3-Paket sofort ausgeben statt zu puffern —
+            # sonst vergehen mehrere Sekunden bis zum ersten Ton, und
+            # Hardware-Radios brechen bei zu langer Stille ab.
+            "-flush_packets", "1",
             "pipe:1",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
