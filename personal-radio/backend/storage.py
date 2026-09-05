@@ -144,6 +144,23 @@ def write_user_state(uid: str, state: dict) -> None:
     write_json(user_dir(uid) / "state.json", state)
 
 
+def update_user_state(uid: str, **fields: Any) -> dict:
+    """
+    Nur einzelne Felder des Zustands ändern — der Rest wird FRISCH von der
+    Platte gelesen.
+
+    Wichtig gegen verlorene Änderungen: wer einen kompletten state-Dict über
+    ein ``await`` hinweg festhält und danach zurückschreibt, überschreibt
+    alles, was zwischenzeitlich gespeichert wurde (z.B. eine gerade geänderte
+    Senderauswahl, die Sekunden später wieder "zurücksprang"). Diese Funktion
+    läuft ohne await, ist also gegenüber anderen Coroutinen atomar.
+    """
+    state = read_user_state(uid)
+    state.update(fields)
+    write_user_state(uid, state)
+    return state
+
+
 def read_user_history(uid: str) -> list[dict]:
     return read_json(user_dir(uid) / "history.json", default=[])
 

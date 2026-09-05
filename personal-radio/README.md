@@ -111,6 +111,7 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Titel mit einer Spieldauer über `max_song_minutes` Minuten werden nie gespielt.
 - Die No-Repeat-Spanne zählt ab dem tatsächlichen Abspielbeginn eines Titels und gilt senderübergreifend pro Titel.
 - Eine geänderte Senderauswahl greift auch im laufenden Betrieb **ab dem nächsten Song**; der aktuelle Song läuft ungestört zu Ende.
+- **Stop pausiert den laufenden Titel:** Der Stream wird beendet und der Player gestoppt, die Abspielstelle und das restliche Audio bleiben aber im Cache. Play setzt genau dort fort (ein paar Sekunden Vorlauf, damit nichts verloren geht). Skip/Vor/Zurück verwerfen die Pausenstelle; ist der Titel ohnehin fast zu Ende, beginnt Play mit dem nächsten.
 - Library is pruned to the 10 most recent MP3s (files currently playing are never deleted).
 
 ---

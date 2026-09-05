@@ -320,9 +320,13 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
             else:
                 logger.warning("[%s] No song available from '%s'", uid, station)
 
-        state["queue"]                 = queue
-        state["current_station_index"] = station_idx
-        storage.write_user_state(uid, state)
+        # Nur die beiden geänderten Felder schreiben: zwischen dem Lesen oben
+        # und hier liegen lange Auflösungen (yt-dlp) — ein kompletter
+        # Rückschreiber würde zwischenzeitliche Änderungen (Lautstärke,
+        # Senderauswahl) wieder auf den alten Stand setzen.
+        storage.update_user_state(
+            uid, queue=queue, current_station_index=station_idx,
+        )
 
         if all_failed and needed > 0:
             set_user_error(uid, "All songs in all stations failed to resolve.")
@@ -396,13 +400,49 @@ async def advance_queue(uid: str, played_song: dict | None = None) -> dict | Non
             played_song = cur
 
         if played_song:
-            storage.add_to_history(uid, played_song)
+            # Beim Fortsetzen eines pausierten Songs steht er schon ganz oben
+            # in der History (er wurde beim ersten Start eingetragen) — dann
+            # keinen doppelten Eintrag anlegen.
+            history = storage.read_user_history(uid)
+            if not (history and _same_song(history[0], played_song)):
+                storage.add_to_history(uid, played_song)
 
         if cur is not None and _same_song(cur, played_song):
             idx += 1
             state["current_index"] = idx
         storage.write_user_state(uid, state)
         return queue[idx] if 0 <= idx < len(queue) else None
+
+
+async def restore_paused_song(uid: str) -> dict | None:
+    """
+    Beim Start der Wiedergabe den pausierten Song wieder an die aktuelle
+    Queue-Position setzen, damit der Producer ihn (ab der gemerkten Stelle)
+    fortsetzt statt mit dem nächsten Titel zu beginnen.
+    """
+    from .stream_server import song_key
+
+    async with get_user_lock(uid):
+        state  = storage.read_user_state(uid)
+        paused = state.get("paused_song") or {}
+        if not paused:
+            return None
+
+        queue = state.get("queue", [])
+        idx   = max(0, min(state.get("current_index", 0), len(queue)))
+        cur   = queue[idx] if idx < len(queue) else None
+        if cur is not None and song_key(cur) == song_key(paused):
+            return cur                       # steht bereits an der Reihe
+
+        entry = {k: v for k, v in paused.items() if k != "position"}
+        queue.insert(idx, entry)
+        state["queue"]         = queue
+        state["current_index"] = idx
+        storage.write_user_state(uid, state)
+        logger.info("[%s] Pausierten Titel fortsetzen: %s — %s (ab %.0fs)",
+                    uid, entry.get("artist", ""), entry.get("song", ""),
+                    float(paused.get("position", 0) or 0))
+        return entry
 
 
 async def go_to_previous(uid: str) -> dict | None:

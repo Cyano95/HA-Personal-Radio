@@ -52,11 +52,13 @@ from .queue_manager import (
     go_to_previous,
     mark_song_played,
     next_is_ready,
+    restore_paused_song,
     set_user_error,
     unmark_unplayed,
 )
 from .icy_server import start_icy_server
 from .stream_server import (
+    clear_paused,
     get_or_create_stream,
     set_stream_callbacks,
     stop_stream,
@@ -147,6 +149,11 @@ class PlaybackEngine:
                 logger.debug("[%s] Already playing, ignoring duplicate start_playback", uid)
                 return True
 
+            # Wurde zuvor gestoppt, wird der angefangene Song wieder an die
+            # aktuelle Position gesetzt — der Producer setzt ihn dann an der
+            # gemerkten Stelle fort.
+            await restore_paused_song(uid)
+
             # Resolve just 1 song so playback starts immediately;
             # the rest are filled in the background while the first plays.
             await ensure_queue_has_entries(uid, count=1)
@@ -178,6 +185,8 @@ class PlaybackEngine:
 
     async def skip_song(self, uid: str) -> bool:
         """Skip the current song; the stream crossfades immediately to the next."""
+        # Wer weiterspringt, will nicht mehr an der pausierten Stelle einsteigen.
+        clear_paused(uid)
         from .stream_server import _streams
         stream = _streams.get(uid)
         if stream and not stream.stopped:
@@ -188,6 +197,7 @@ class PlaybackEngine:
 
     async def prev_song(self, uid: str) -> bool:
         """Jump back to the previous song."""
+        clear_paused(uid)
         prev = await go_to_previous(uid)
         if not prev:
             return False
@@ -678,6 +688,14 @@ async def api_nowplaying(request: Request):
     song   = (stream.current_song if stream and not stream.stopped else None) \
              or get_current_song(uid)
 
+    # Gestoppt, aber ein Song wartet an seiner Pausenstelle → diesen zeigen,
+    # damit die UI sagt, wo es beim nächsten Play weitergeht.
+    paused_song = state.get("paused_song") or {}
+    is_playing  = state.get("is_playing", False)
+    paused      = bool(paused_song) and not is_playing
+    if paused:
+        song = paused_song
+
     entity_id   = state.get("player_entity_id")
     player_name = entity_id
     volume      = state.get("volume")
@@ -708,7 +726,10 @@ async def api_nowplaying(request: Request):
         "station":          song.get("station")   if song else None,
         "player_entity_id": entity_id,
         "player_name":      player_name,
-        "is_playing":       state.get("is_playing", False),
+        "is_playing":       is_playing,
+        # Angefangener Titel wartet — Play setzt ihn an dieser Stelle fort.
+        "paused":           paused,
+        "paused_position":  float(paused_song.get("position", 0) or 0) if paused else 0,
         # Live-Lautstärke des Players (None, wenn nicht ermittelbar)
         "volume":           volume,
         # Zählt jeden Song-Start hoch — die UI erkennt daran auch den Wechsel

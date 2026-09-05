@@ -1,6 +1,6 @@
 name: "Personal Radio"
 description: "Personalized radio using your HA media players."
-version: "1.4.2"
+version: "1.5.0"
 slug: personal-radio
 init: false
 

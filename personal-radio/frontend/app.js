@@ -57,6 +57,7 @@ const D = {
   stationsCount: document.getElementById('stations-count'),
   search:        document.getElementById('station-search'),
   stationGrid:   document.getElementById('station-grid'),
+  pauseChip:     document.getElementById('pause-chip'),
   historyList:   document.getElementById('history-list'),
   toasts:        document.getElementById('toast-container'),
 };
@@ -112,6 +113,9 @@ function renderPlayer() {
   D.artWrap.classList.toggle('is-playing', !!isPlaying);
 
   // Track info
+  // Pausiert = gestoppt, aber der angefangene Titel wartet an seiner Stelle
+  // und wird beim nächsten Play genau dort fortgesetzt.
+  const paused = !!now?.paused && !isPlaying && S.pending === null;
   if (now?.song && now?.artist) {
     D.trackTitle.textContent  = now.song;
     D.trackArtist.textContent = now.artist;
@@ -129,6 +133,9 @@ function renderPlayer() {
     D.stationChip.textContent = '';
     D.playerLabel.textContent = '';
   }
+  D.pauseChip.textContent = paused
+    ? `Pausiert · weiter bei ${fmtTime(now.paused_position)}`
+    : '';
 
   // Play button state
   const btnPlayIcon  = D.btnPlay.querySelector('.icon-play');
@@ -211,8 +218,12 @@ function renderSelectedChips() {
   }
 }
 
-// ── Render: Station grid ───────────────────────────────────────────────────────
-function renderStations() {
+// ── Render: Station list ───────────────────────────────────────────────────────
+// Einzeilige Liste. Namen, die breiter als die Zeile sind, laufen durch
+// (Marquee) statt abgeschnitten zu werden.
+let _stationsSig = '';
+
+function renderStations(force = false) {
   const selected = new Set(S.userState?.selected_stations || []);
   const q = S.search.toLowerCase();
   const list = S.stations.filter(s =>
@@ -222,10 +233,12 @@ function renderStations() {
   D.stationsCount.textContent = `${selected.size} / ${S.stations.length}`;
 
   if (!list.length && !S.stations.length) {
+    _stationsSig = 'loading';
     D.stationGrid.innerHTML = '<div class="stations-loading">Sender werden geladen…</div>';
     return;
   }
   if (!list.length) {
+    _stationsSig = 'empty:' + q;
     D.stationGrid.innerHTML = '<div class="stations-loading">Keine Treffer</div>';
     return;
   }
@@ -248,17 +261,54 @@ function renderStations() {
     return formatStationName(a.station).localeCompare(formatStationName(b.station), 'de');
   });
 
+  // Nur neu aufbauen, wenn sich wirklich etwas geändert hat — sonst würde
+  // jeder Polling-Durchlauf (alle 3 s) die Laufschrift zurücksetzen.
+  const sig = list.map(s => `${s.station}|${s.song_count || 0}|${selected.has(s.station) ? 1 : 0}`).join('\n');
+  if (!force && sig === _stationsSig) return;
+  _stationsSig = sig;
+
   D.stationGrid.innerHTML = '';
   for (const s of list) {
     const isSel = selected.has(s.station);
     const tile = document.createElement('div');
     tile.className = 'station-tile' + (isSel ? ' selected' : '');
+    tile.title = formatStationName(s.station);
     tile.innerHTML = `
-      <div class="station-tile-name">${escHtml(formatStationName(s.station))}</div>
-      <div class="station-tile-count">${(s.song_count || 0).toLocaleString('de')} Songs</div>
+      <span class="station-dot"></span>
+      <div class="station-tile-name"><span>${escHtml(formatStationName(s.station))}</span></div>
+      <span class="station-tile-count">${(s.song_count || 0).toLocaleString('de')} Songs</span>
     `;
     tile.addEventListener('click', () => toggleStation(s.station));
     D.stationGrid.append(tile);
+  }
+  scheduleMarqueeUpdate();
+}
+
+// ── Laufschrift für zu lange Sendernamen ──────────────────────────────────────
+let _marqueeRaf = null;
+function scheduleMarqueeUpdate() {
+  if (_marqueeRaf) cancelAnimationFrame(_marqueeRaf);
+  _marqueeRaf = requestAnimationFrame(() => {
+    _marqueeRaf = null;
+    updateMarquees();
+  });
+}
+
+function updateMarquees() {
+  for (const el of D.stationGrid.querySelectorAll('.station-tile-name')) {
+    const inner = el.firstElementChild;
+    if (!inner) continue;
+    const shift = Math.ceil(inner.scrollWidth - el.clientWidth);
+    if (shift > 3) {
+      // ~35 px/s plus Pausen an den Enden
+      el.style.setProperty('--marquee-shift', shift + 'px');
+      el.style.setProperty('--marquee-dur', (3 + shift / 35).toFixed(1) + 's');
+      el.classList.add('is-scrolling');
+    } else if (el.classList.contains('is-scrolling')) {
+      el.classList.remove('is-scrolling');
+      el.style.removeProperty('--marquee-shift');
+      el.style.removeProperty('--marquee-dur');
+    }
   }
 }
 
@@ -302,6 +352,10 @@ function render() {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function formatStationName(raw) {
   return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+function fmtTime(sec) {
+  const t = Math.max(0, Math.round(+sec || 0));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
 }
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -412,10 +466,61 @@ async function pressPrev() {
   render();
 }
 
-async function toggleStation(name) {
-  const state = S.userState;
-  if (!state) return;
-  const cur = [...(state.selected_stations || [])];
+// ── Senderauswahl ──────────────────────────────────────────────────────────────
+// Die Auswahl "sprang" bisher gelegentlich zurück: das 15-s-Polling ersetzte
+// den kompletten Zustand, während eine Speicherung noch unterwegs war, und
+// mehrere schnelle Klicks schickten konkurrierende Anfragen. Jetzt gilt:
+//   • es ist immer nur EINE Speicherung unterwegs, spätere Klicks werden
+//     zusammengefasst (der zuletzt gewünschte Stand gewinnt),
+//   • solange gespeichert wird (plus kurzer Nachlauf) hat die lokale Auswahl
+//     Vorrang vor den Polling-Antworten.
+const SEL = {
+  saving:    false,   // Speicherung läuft
+  target:    null,    // gewünschter Stand, der noch geschickt werden muss
+  settledAt: 0,       // Zeitpunkt der letzten abgeschlossenen Speicherung
+};
+
+// Während dieser Zeitspanne nach dem letzten Speichern gewinnt die lokale
+// Auswahl — der Server braucht einen Moment, bis er sie zurückmeldet.
+const SEL_GRACE_MS = 2500;
+
+function selectionBusy() {
+  return SEL.saving || SEL.target !== null ||
+         (Date.now() - SEL.settledAt) < SEL_GRACE_MS;
+}
+
+async function flushSelection() {
+  if (SEL.saving) return;              // läuft bereits — übernimmt SEL.target
+  SEL.saving = true;
+  try {
+    while (SEL.target !== null) {
+      const want = SEL.target;
+      SEL.target = null;
+      const res = await api('api/user/state', 'POST', { selected_stations: want });
+      if (!res) {
+        // Fehlgeschlagen: der Serverstand ist maßgeblich — noch offene
+        // Änderungen verwerfen und den echten Stand holen.
+        toast('Senderauswahl konnte nicht gespeichert werden.', true);
+        SEL.target = null;
+        const st = await api('api/user/state');
+        if (st) S.userState = st;
+        break;
+      }
+      // Nur die Antwort auf den ZULETZT gewünschten Stand übernehmen.
+      if (SEL.target === null && S.userState && Array.isArray(res.selected_stations)) {
+        S.userState.selected_stations = res.selected_stations;
+      }
+    }
+  } finally {
+    SEL.saving    = false;
+    SEL.settledAt = Date.now();
+    render();
+  }
+}
+
+function toggleStation(name) {
+  if (!S.userState) return;
+  const cur = [...(S.userState.selected_stations || [])];
   const idx = cur.indexOf(name);
   if (idx === -1) {
     cur.push(name);
@@ -423,19 +528,14 @@ async function toggleStation(name) {
     if (cur.length <= 1) { toast('Mindestens 1 Sender muss ausgewählt bleiben.', true); return; }
     cur.splice(idx, 1);
   }
-  // Optimistic update
+  // Sofort anzeigen, Speicherung serialisiert hinterher
   S.userState.selected_stations = cur;
+  SEL.target = cur;
   render();
-  // Persist
-  const res = await api('api/user/state', 'POST', { selected_stations: cur });
-  if (!res) {
-    // Rollback
-    S.userState.selected_stations = state.selected_stations;
-    render();
-    toast('Senderauswahl konnte nicht gespeichert werden.', true);
-  } else if (S.now?.is_playing) {
-    toast('Senderauswahl gespeichert — greift ab dem nächsten Song.');
+  if (S.now?.is_playing) {
+    toast('Senderauswahl greift ab dem nächsten Song.');
   }
+  flushSelection();
 }
 
 async function selectPlayer(entityId) {
@@ -475,7 +575,14 @@ async function pollAll() {
     api('api/user/history'),
   ]);
   if (now && S.optPlay === null) S.now = now;
-  if (st)      S.userState = st;
+  if (st) {
+    // Eigene, noch nicht bestätigte Senderauswahl behalten — sonst kämen
+    // gerade abgewählte Sender kurz darauf wieder zurück.
+    if (selectionBusy() && S.userState) {
+      st.selected_stations = S.userState.selected_stations;
+    }
+    S.userState = st;
+  }
   if (players) { S.players = players; renderPlayers(); }
   if (hist)    { S.history = hist;   renderHistory(); }
   render();
@@ -532,6 +639,16 @@ D.playerSelect.addEventListener('change', e => selectPlayer(e.target.value));
 D.search.addEventListener('input', e => {
   S.search = e.target.value;
   renderStations();
+});
+
+// Schriftarten werden nachgeladen — danach sind die Textbreiten erst final.
+if (document.fonts?.ready) document.fonts.ready.then(scheduleMarqueeUpdate);
+
+// Bei geänderter Breite neu prüfen, welche Namen durchlaufen müssen.
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(scheduleMarqueeUpdate, 200);
 });
 
 // Keyboard shortcuts

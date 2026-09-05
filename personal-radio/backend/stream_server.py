@@ -68,6 +68,78 @@ PACE_MAX_BEHIND = 2.0
 QUEUE_FILL_TIMEOUT = 60.0
 RESOLVE_TIMEOUT    = 40.0
 
+# ── Pause / Fortsetzen ───────────────────────────────────────────────────────
+# Beim Stoppen wird der laufende Song nicht verworfen, sondern an der
+# aktuellen Stelle "pausiert": Position + restliches PCM bleiben im Cache,
+# damit beim nächsten Play genau dort weitergespielt wird.
+#
+# Der Vorlauf gegenüber Echtzeit (Encoder-Lead + Player-Puffer) lässt sich
+# nicht exakt bestimmen — lieber ein paar Sekunden doppelt hören als eine
+# Lücke, deshalb wird die gemerkte Position um diesen Wert zurückgesetzt.
+RESUME_PREROLL_SEC    = 4.0
+# Weniger Rest als das → Song gilt als beendet, keine Pause merken.
+MIN_RESUME_SEC        = 5.0
+# Obergrenze für das im RAM gehaltene Rest-PCM (~6 min). Größere Reste
+# werden beim Fortsetzen per ffmpeg -ss neu dekodiert statt gepuffert.
+MAX_PAUSE_CACHE_BYTES = 64 * 1024 * 1024
+
+# {uid: {"key": str, "pcm": bytes}} — Rest-Audio des pausierten Songs.
+_paused_audio: dict[str, dict] = {}
+
+
+def song_key(song: dict | None) -> str:
+    """Stabile Kennung eines Songs (yt_id, sonst Interpret|Titel)."""
+    if not song:
+        return ""
+    yt_id = (song.get("yt_id") or "").strip()
+    if yt_id:
+        return yt_id
+    return f"{song.get('artist', '').lower()}|{song.get('song', '').lower()}"
+
+
+def pause_position(uid: str, song: dict | None) -> float:
+    """Gemerkte Abspielposition (Sekunden) — 0, wenn keine passende Pause."""
+    if not song:
+        return 0.0
+    try:
+        paused = storage.read_user_state(uid).get("paused_song") or {}
+    except Exception:
+        return 0.0
+    if not paused or song_key(paused) != song_key(song):
+        return 0.0
+    try:
+        return max(0.0, float(paused.get("position", 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pop_paused_audio(uid: str, song: dict | None) -> bytes | None:
+    """Zwischengespeichertes Rest-PCM des pausierten Songs entnehmen."""
+    entry = _paused_audio.get(uid)
+    if not entry or entry.get("key") != song_key(song):
+        return None
+    del _paused_audio[uid]
+    return entry.get("pcm")
+
+
+def clear_paused(uid: str) -> None:
+    """Pausenzustand verwerfen (Skip/Prev oder Song wurde fortgesetzt)."""
+    _paused_audio.pop(uid, None)
+    try:
+        if storage.read_user_state(uid).get("paused_song"):
+            storage.update_user_state(uid, paused_song=None)
+    except Exception:
+        logger.debug("[%s] Could not clear paused_song", uid)
+
+
+def paused_yt_id(uid: str) -> str:
+    try:
+        paused = storage.read_user_state(uid).get("paused_song") or {}
+    except Exception:
+        return ""
+    return (paused.get("yt_id") or "").strip()
+
+
 # ── Global registry ──────────────────────────────────────────────────────────
 _streams: dict[str, "UserStream"] = {}
 _registry_lock: asyncio.Lock | None = None
@@ -159,6 +231,11 @@ class UserStream:
         self._pace_bytes:  int   = 0             # PCM-Bytes seit Anker
         self._lag_warn_at: float = 0.0           # rate-limit für Lag-Warnung
 
+        # Position im aktuell laufenden Song — Grundlage für Pause/Fortsetzen.
+        self._song_pcm:      bytes | None = None  # PCM ab Wiedergabebeginn
+        self._song_pos:      int   = 0            # bereits geschriebene Bytes
+        self._song_offset_s: float = 0.0          # Startversatz im Song (s)
+
     # ── Listener management ───────────────────────────────────────────────
 
     async def subscribe(self) -> asyncio.Queue:
@@ -195,10 +272,8 @@ class UserStream:
             logger.info("[%s] No listeners — stopping stream", self.uid)
             self._force_stop()
             try:
-                state = storage.read_user_state(self.uid)
-                if state.get("is_playing"):
-                    state["is_playing"] = False
-                    storage.write_user_state(self.uid, state)
+                if storage.read_user_state(self.uid).get("is_playing"):
+                    storage.update_user_state(self.uid, is_playing=False)
             except Exception:
                 pass
 
@@ -266,7 +341,12 @@ class UserStream:
         source: str,
         skip_event: asyncio.Event | None = None,
         headers: dict | None = None,
+        start_at: float = 0.0,
     ) -> bytes | None:
+        """
+        *start_at*: Sekunden, die am Anfang übersprungen werden — damit ein
+        pausierter Song genau dort fortgesetzt wird, wo er gestoppt wurde.
+        """
         is_url = source.startswith("http://") or source.startswith("https://")
         cmd = ["ffmpeg", "-y"]
         if is_url:
@@ -284,6 +364,9 @@ class UserStream:
                 )
                 if other:
                     cmd += ["-headers", other]
+        if start_at > 0:
+            # vor -i = schnelles Suchen (Input-Seeking)
+            cmd += ["-ss", f"{start_at:.3f}"]
         cmd += ["-i", source,
                 "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
                 "pipe:1"]
@@ -416,6 +499,7 @@ class UserStream:
         encoder: asyncio.subprocess.Process,
         source: str,
         headers: dict | None = None,
+        start_at: float = 0.0,
     ) -> bytes | None:
         """
         Song im Vordergrund dekodieren (kein Prefetch vorhanden).
@@ -424,7 +508,7 @@ class UserStream:
         """
         pcm, status = await self._await_with_keepalive(
             encoder,
-            self._decode_pcm(source, self._skip_event, headers),
+            self._decode_pcm(source, self._skip_event, headers, start_at),
             FG_DECODE_TIMEOUT,
             "Foreground decode",
         )
@@ -464,6 +548,7 @@ class UserStream:
                 self.stopped = True
                 return True
             self._pace_bytes += len(chunk)
+            self._song_pos   += len(chunk)
             now  = time.monotonic()
             lead = self._pace_bytes / BYTES_PER_SEC - (now - self._pace_base)
             if lead > REALTIME_AHEAD:
@@ -477,6 +562,55 @@ class UserStream:
             else:
                 await asyncio.sleep(0)
         return False
+
+    # ── Pause / Fortsetzen ────────────────────────────────────────────────
+
+    def _save_pause_state(self) -> None:
+        """
+        Beim Stoppen den laufenden Song "einfrieren": Position merken und das
+        restliche PCM im RAM behalten, damit beim nächsten Play genau dort
+        weitergespielt wird. Ist der Song praktisch zu Ende, wird nichts
+        gemerkt (dann beginnt der nächste Song ganz normal).
+        """
+        song = self.current_song
+        _paused_audio.pop(self.uid, None)
+        if not song or not self._song_pcm:
+            return
+
+        # Rest ab der tatsächlichen Stopp-Stelle — ist davon kaum noch etwas
+        # übrig, lohnt das Fortsetzen nicht (der Song war praktisch zu Ende).
+        pos = max(0, min(len(self._song_pcm), (self._song_pos // 4) * 4))
+        if len(self._song_pcm) - pos < MIN_RESUME_SEC * BYTES_PER_SEC:
+            try:
+                storage.update_user_state(self.uid, paused_song=None)
+            except Exception:
+                pass
+            return
+
+        played_s = self._song_offset_s + pos / BYTES_PER_SEC
+        position = max(0.0, played_s - RESUME_PREROLL_SEC)
+
+        # Auf Frame-Grenze (4 Byte = 1 Stereo-Sample) ausrichten
+        cut  = int((position - self._song_offset_s) * BYTES_PER_SEC)
+        cut  = max(0, min(pos, (cut // 4) * 4))
+        rest = self._song_pcm[cut:]
+
+        try:
+            paused = dict(song)
+            paused["position"] = round(position, 2)
+            storage.update_user_state(self.uid, paused_song=paused)
+        except Exception:
+            logger.debug("[%s] Could not persist paused_song", self.uid)
+            return
+
+        if rest and len(rest) <= MAX_PAUSE_CACHE_BYTES:
+            _paused_audio[self.uid] = {"key": song_key(song), "pcm": rest}
+
+        logger.info(
+            "[%s] Pausiert bei %.0fs: %s — %s (%s)",
+            self.uid, position, song.get("artist", ""), song.get("song", ""),
+            "Rest im Cache" if self.uid in _paused_audio else "wird neu dekodiert",
+        )
 
     # ── Producer ──────────────────────────────────────────────────────────
 
@@ -495,8 +629,9 @@ class UserStream:
         encoder    = await self._start_encoder()
         relay_task = asyncio.create_task(self._relay_encoder(encoder))
 
-        prefetched_song: dict | None  = None
-        prefetched_pcm:  bytes | None = None
+        prefetched_song:   dict | None  = None
+        prefetched_pcm:    bytes | None = None
+        prefetched_offset: float        = 0.0
 
         try:
             while not self.stopped:
@@ -506,8 +641,9 @@ class UserStream:
                 # next song (old selection); the queue was already rebuilt.
                 if self._queue_dirty:
                     self._queue_dirty = False
-                    prefetched_song = None
-                    prefetched_pcm  = None
+                    prefetched_song   = None
+                    prefetched_pcm    = None
+                    prefetched_offset = 0.0
 
                 if _cb_ensure_queue:
                     if prefetched_song is not None and prefetched_pcm is not None:
@@ -529,11 +665,16 @@ class UserStream:
                             continue          # wird am Loop-Anfang neu geleert
 
                 # ── Get current song + PCM ─────────────────────────────────
+                song_offset_s = 0.0
                 if prefetched_song is not None and prefetched_pcm is not None:
-                    song     = prefetched_song
-                    song_pcm = prefetched_pcm
-                    prefetched_song = None
-                    prefetched_pcm  = None
+                    song          = prefetched_song
+                    song_pcm      = prefetched_pcm
+                    # Der Anfang des Songs steckt bereits in der Überblendung
+                    # — für Pause/Fortsetzen zählt diese Zeit mit.
+                    song_offset_s = prefetched_offset
+                    prefetched_song   = None
+                    prefetched_pcm    = None
+                    prefetched_offset = 0.0
                 else:
                     song = (_cb_get_current_song(self.uid)
                             if _cb_get_current_song else None)
@@ -544,40 +685,57 @@ class UserStream:
                         await asyncio.sleep(1.0)
                         continue
 
-                    from .downloader import get_audio_source as _get_src
                     artist_    = song.get("artist", "")
                     song_name_ = song.get("song", "")
-                    # Auch der Resolve kann yt-dlp anwerfen → Keepalive.
-                    source_, src_status = await self._await_with_keepalive(
-                        encoder, _get_src(artist_, song_name_),
-                        RESOLVE_TIMEOUT, "Resolve",
-                    )
-                    if src_status == "interrupted":
-                        continue
-                    if not source_:
-                        logger.warning("[%s] Cannot resolve audio: %s — %s",
-                                       self.uid, artist_, song_name_)
-                        if _cb_advance_queue:
-                            await _cb_advance_queue(self.uid, song)
-                        continue
 
-                    src_type = "file" if source_.startswith("/") else "url"
-                    logger.info("[%s] Decoding (%s): %s — %s",
-                                self.uid, src_type, artist_, song_name_)
-                    from .downloader import get_source_headers as _get_hdrs
-                    headers_ = (await _get_hdrs(artist_, song_name_)
-                                if src_type == "url" else None)
-                    # Mit Stille-Keepalive + Timeout: ein hängender ffmpeg
-                    # (gedrosselte/tote URL) darf nie mehr den ganzen Stream
-                    # verstummen lassen (→ ICY-Watchdog kappte sonst alles).
-                    song_pcm = await self._decode_foreground(encoder, source_, headers_)
+                    # ── Pausierter Song? Genau dort fortsetzen ────────────
+                    # Das Rest-PCM liegt meist noch im Cache (Stop hat es
+                    # aufgehoben) — dann startet die Wiedergabe sofort, ohne
+                    # erneutes Auflösen/Dekodieren.
+                    resume_at = pause_position(self.uid, song)
+                    song_pcm  = pop_paused_audio(self.uid, song) if resume_at else None
+                    if song_pcm:
+                        logger.info("[%s] Fortsetzen bei %.0fs (aus Cache): %s — %s",
+                                    self.uid, resume_at, artist_, song_name_)
 
-                    if song_pcm is None or self._skip_event.is_set():
-                        logger.info("[%s] Skipped during decode", self.uid)
-                        if _cb_advance_queue:
-                            await _cb_advance_queue(self.uid, song)
-                        self._skip_event.clear()
-                        continue
+                    if song_pcm is None:
+                        from .downloader import get_audio_source as _get_src
+                        # Auch der Resolve kann yt-dlp anwerfen → Keepalive.
+                        source_, src_status = await self._await_with_keepalive(
+                            encoder, _get_src(artist_, song_name_),
+                            RESOLVE_TIMEOUT, "Resolve",
+                        )
+                        if src_status == "interrupted":
+                            continue
+                        if not source_:
+                            logger.warning("[%s] Cannot resolve audio: %s — %s",
+                                           self.uid, artist_, song_name_)
+                            if _cb_advance_queue:
+                                await _cb_advance_queue(self.uid, song)
+                            continue
+
+                        src_type = "file" if source_.startswith("/") else "url"
+                        logger.info("[%s] Decoding (%s)%s: %s — %s",
+                                    self.uid, src_type,
+                                    f" ab {resume_at:.0f}s" if resume_at else "",
+                                    artist_, song_name_)
+                        from .downloader import get_source_headers as _get_hdrs
+                        headers_ = (await _get_hdrs(artist_, song_name_)
+                                    if src_type == "url" else None)
+                        # Mit Stille-Keepalive + Timeout: ein hängender ffmpeg
+                        # (gedrosselte/tote URL) darf nie mehr den ganzen Stream
+                        # verstummen lassen (→ ICY-Watchdog kappte sonst alles).
+                        song_pcm = await self._decode_foreground(
+                            encoder, source_, headers_, resume_at)
+
+                        if song_pcm is None or self._skip_event.is_set():
+                            logger.info("[%s] Skipped during decode", self.uid)
+                            if _cb_advance_queue:
+                                await _cb_advance_queue(self.uid, song)
+                            self._skip_event.clear()
+                            continue
+
+                    song_offset_s = resume_at
 
                 if not song_pcm:
                     # Decoder lieferte nichts (URL abgelaufen/tot/gedrosselt).
@@ -599,15 +757,26 @@ class UserStream:
                 self.current_song = song
                 self.song_seq    += 1
 
+                # Grundlage für Pause/Fortsetzen: PCM ab hier + Schreibposition
+                self._song_pcm      = song_pcm
+                self._song_pos      = 0
+                self._song_offset_s = song_offset_s
+                # Der Pausenzustand ist mit dem Start aufgebraucht — sonst
+                # würde der Song beim nächsten Play erneut ab hier starten.
+                clear_paused(self.uid)
+
                 # ── Diagnose: wie viel Audio haben wir wirklich? ──────────
                 pcm_sec  = len(song_pcm) / BYTES_PER_SEC
                 exp_sec  = song.get("duration") or 0
                 logger.info(
-                    "[%s] Now playing: %s — %s (%.0fs PCM%s)",
+                    "[%s] Now playing: %s — %s (%.0fs PCM%s%s)",
                     self.uid, song.get("artist", ""), song.get("song", ""),
                     pcm_sec, f", erwartet ~{exp_sec}s" if exp_sec else "",
+                    f", fortgesetzt ab {song_offset_s:.0f}s" if song_offset_s else "",
                 )
-                if exp_sec and pcm_sec < exp_sec * 0.8 - 5:
+                # Beim Fortsetzen ist das PCM naturgemäß kürzer als die
+                # Songdauer — das ist kein abgerissener Download.
+                if not song_offset_s and exp_sec and pcm_sec < exp_sec * 0.8 - 5:
                     # Download ist vermutlich mittendrin abgerissen — URL
                     # verwerfen, damit der Titel nächstes Mal frisch resolved.
                     logger.warning(
@@ -721,8 +890,9 @@ class UserStream:
                     blended = self._blend(tail_pcm[:blend_n], next_pcm[:blend_n])
                     skipped = await self._write_pcm(encoder, blended)
                     if not skipped and next_song and not self._queue_dirty:
-                        prefetched_song = next_song
-                        prefetched_pcm  = next_pcm[blend_n:]
+                        prefetched_song   = next_song
+                        prefetched_pcm    = next_pcm[blend_n:]
+                        prefetched_offset = blend_n / BYTES_PER_SEC
                     elif skipped:
                         self._skip_event.clear()
                 else:
@@ -733,8 +903,15 @@ class UserStream:
         except Exception:
             logger.exception("[%s] Unexpected error in producer", self.uid)
         finally:
-            self.stopped      = True
+            self.stopped = True
+            # Laufenden Song "einfrieren", BEVOR current_song verworfen wird —
+            # beim nächsten Play geht es genau hier weiter.
+            try:
+                self._save_pause_state()
+            except Exception:
+                logger.debug("[%s] Could not save pause state", self.uid, exc_info=True)
             self.current_song = None
+            self._song_pcm    = None
             try:
                 if encoder.stdin and not encoder.stdin.is_closing():
                     encoder.stdin.close()
@@ -748,12 +925,14 @@ class UserStream:
             # on next play — which happens in the background and is fast).
             try:
                 from .downloader import clear_stream_urls as _clear
-                us = storage.read_user_state(self.uid)
+                us    = storage.read_user_state(self.uid)
+                keep  = paused_yt_id(self.uid)   # pausierter Song: URL behalten
                 yt_ids = [
                     item["yt_id"] for item in us.get("queue", [])
-                    if item.get("yt_id")
+                    if item.get("yt_id") and item["yt_id"] != keep
                 ]
-                asyncio.create_task(_clear(yt_ids or None))
+                if yt_ids:
+                    asyncio.create_task(_clear(yt_ids))
             except Exception:
                 pass
 
