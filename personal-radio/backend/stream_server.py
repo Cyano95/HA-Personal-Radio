@@ -16,6 +16,7 @@ Key design decisions:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from collections import deque
@@ -26,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
-from . import storage
+from . import audio, storage
 
 logger = logging.getLogger("personal_radio.stream")
 
@@ -67,6 +68,9 @@ PACE_MAX_BEHIND = 2.0
 # Keepalive-Stille geschrieben, damit der Stream nie verstummt.
 QUEUE_FILL_TIMEOUT = 60.0
 RESOLVE_TIMEOUT    = 40.0
+# Lautheitsmessung + Randbeschneidung (läuft im Threadpool, damit der
+# Producer nicht blockiert; auf kleinen Geräten wenige Sekunden).
+ANALYZE_TIMEOUT    = 60.0
 
 # ── Pause / Fortsetzen ───────────────────────────────────────────────────────
 # Beim Stoppen wird der laufende Song nicht verworfen, sondern an der
@@ -109,6 +113,28 @@ def pause_position(uid: str, song: dict | None) -> float:
         return 0.0
     try:
         return max(0.0, float(paused.get("position", 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pause_lead_trim(uid: str, song: dict | None) -> float:
+    """
+    Sekunden, die beim ersten Abspielen vorne abgeschnitten wurden.
+
+    Die gemerkte Position bezieht sich auf das VERARBEITETE Audio; muss der
+    Song nach einem Neustart per ffmpeg neu dekodiert werden, sucht ffmpeg
+    aber im Original — dann ist dieser Versatz aufzuschlagen.
+    """
+    if not song:
+        return 0.0
+    try:
+        paused = storage.read_user_state(uid).get("paused_song") or {}
+    except Exception:
+        return 0.0
+    if not paused or song_key(paused) != song_key(song):
+        return 0.0
+    try:
+        return max(0.0, float(paused.get("lead_trim", 0.0)))
     except (TypeError, ValueError):
         return 0.0
 
@@ -235,6 +261,7 @@ class UserStream:
         self._song_pcm:      bytes | None = None  # PCM ab Wiedergabebeginn
         self._song_pos:      int   = 0            # bereits geschriebene Bytes
         self._song_offset_s: float = 0.0          # Startversatz im Song (s)
+        self._song_lead:     float = 0.0          # am Anfang abgeschnittene s
 
     # ── Listener management ───────────────────────────────────────────────
 
@@ -446,19 +473,33 @@ class UserStream:
 
     @staticmethod
     def _blend(tail: bytes, head: bytes) -> bytes:
-        n = (min(len(tail), len(head), CROSSFADE_BYTES) // 4) * 4
+        n = (min(len(tail), len(head)) // 4) * 4
         if n == 0:
             return b""
         a = np.frombuffer(tail[:n], dtype=np.int16).astype(np.float32)
         b = np.frombuffer(head[:n], dtype=np.int16).astype(np.float32)
         n_frames = n // 4
-        fi = np.linspace(0.0, 1.0, n_frames, dtype=np.float32)
-        fo = 1.0 - fi
+        # Gleichleistungskurven statt linear — eine lineare Überblendung
+        # senkt die wahrgenommene Lautstärke in der Mitte um ~3 dB.
+        fo, fi = audio.equal_power_curves(n_frames)
         mixed = np.clip(
             a * np.repeat(fo, 2) + b * np.repeat(fi, 2),
             -32768, 32767,
         ).astype(np.int16)
         return mixed.tobytes()
+
+    # ── Lautheit / Ränder ─────────────────────────────────────────────────
+
+    async def _process_audio(self, pcm: bytes, trim_head: bool = True):
+        """
+        Song messen, Ränder beschneiden, auf Ziel-Lautheit bringen.
+        Läuft im Threadpool — bei 40 MB PCM dauert das je nach Gerät
+        einige Sekunden und darf den Event-Loop nicht blockieren.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, functools.partial(audio.analyze_and_process, pcm,
+                                    trim_head=trim_head))
 
     # ── Rate-limited PCM writer ───────────────────────────────────────────
 
@@ -607,7 +648,8 @@ class UserStream:
 
         try:
             paused = dict(song)
-            paused["position"] = round(position, 2)
+            paused["position"]  = round(position, 2)
+            paused["lead_trim"] = round(self._song_lead, 3)
             storage.update_user_state(self.uid, paused_song=paused)
         except Exception:
             logger.debug("[%s] Could not persist paused_song", self.uid)
@@ -642,6 +684,7 @@ class UserStream:
         prefetched_song:   dict | None  = None
         prefetched_pcm:    bytes | None = None
         prefetched_offset: float        = 0.0
+        prefetched_lead:   float        = 0.0
 
         try:
             while not self.stopped:
@@ -654,6 +697,7 @@ class UserStream:
                     prefetched_song   = None
                     prefetched_pcm    = None
                     prefetched_offset = 0.0
+                    prefetched_lead   = 0.0
 
                 if _cb_ensure_queue:
                     if prefetched_song is not None and prefetched_pcm is not None:
@@ -676,15 +720,18 @@ class UserStream:
 
                 # ── Get current song + PCM ─────────────────────────────────
                 song_offset_s = 0.0
+                lead_trim     = 0.0
                 if prefetched_song is not None and prefetched_pcm is not None:
                     song          = prefetched_song
                     song_pcm      = prefetched_pcm
                     # Der Anfang des Songs steckt bereits in der Überblendung
                     # — für Pause/Fortsetzen zählt diese Zeit mit.
                     song_offset_s = prefetched_offset
+                    lead_trim     = prefetched_lead
                     prefetched_song   = None
                     prefetched_pcm    = None
                     prefetched_offset = 0.0
+                    prefetched_lead   = 0.0
                 else:
                     song = (_cb_get_current_song(self.uid)
                             if _cb_get_current_song else None)
@@ -703,7 +750,10 @@ class UserStream:
                     # aufgehoben) — dann startet die Wiedergabe sofort, ohne
                     # erneutes Auflösen/Dekodieren.
                     resume_at = pause_position(self.uid, song)
+                    lead_trim = pause_lead_trim(self.uid, song)
+                    # Aus dem Cache kommt bereits fertig verarbeitetes Audio.
                     song_pcm  = pop_paused_audio(self.uid, song) if resume_at else None
+                    processed = song_pcm is not None
                     if song_pcm:
                         logger.info("[%s] Fortsetzen bei %.0fs (aus Cache): %s — %s",
                                     self.uid, resume_at, artist_, song_name_)
@@ -735,8 +785,11 @@ class UserStream:
                         # Mit Stille-Keepalive + Timeout: ein hängender ffmpeg
                         # (gedrosselte/tote URL) darf nie mehr den ganzen Stream
                         # verstummen lassen (→ ICY-Watchdog kappte sonst alles).
+                        # Beim Fortsetzen zählt der beschnittene Anfang mit:
+                        # die gemerkte Position bezieht sich auf das
+                        # verarbeitete Audio, ffmpeg sucht aber im Original.
                         song_pcm = await self._decode_foreground(
-                            encoder, source_, headers_, resume_at)
+                            encoder, source_, headers_, resume_at + lead_trim)
 
                         if song_pcm is None or self._skip_event.is_set():
                             logger.info("[%s] Skipped during decode", self.uid)
@@ -746,6 +799,31 @@ class UserStream:
                             continue
 
                     song_offset_s = resume_at
+
+                    # ── Lautheit angleichen, Ränder beschneiden ───────────
+                    if song_pcm and not processed:
+                        res, st_ = await self._await_with_keepalive(
+                            encoder,
+                            self._process_audio(song_pcm, trim_head=not resume_at),
+                            ANALYZE_TIMEOUT, "Audioanalyse",
+                        )
+                        if st_ == "interrupted":
+                            continue
+                        if res is not None:
+                            song_pcm = res.pcm
+                            # Beim Fortsetzen wurde der Anfang NICHT erneut
+                            # beschnitten — dann gilt weiter der ursprüngliche
+                            # Versatz, sonst läge ein zweites Pausieren daneben.
+                            if not resume_at:
+                                lead_trim = res.lead_trim
+                            if res.gain_db or res.lead_trim or res.tail_trim:
+                                logger.info(
+                                    "[%s] Pegel %.1f LUFS → %+.1f dB, "
+                                    "Ränder −%.1fs/−%.1fs: %s — %s",
+                                    self.uid, res.lufs, res.gain_db,
+                                    res.lead_trim, res.tail_trim,
+                                    artist_, song_name_,
+                                )
 
                 if not song_pcm:
                     # Decoder lieferte nichts (URL abgelaufen/tot/gedrosselt).
@@ -771,6 +849,10 @@ class UserStream:
                 self._song_pcm      = song_pcm
                 self._song_pos      = 0
                 self._song_offset_s = song_offset_s
+                self._song_lead     = lead_trim
+                # Referenzpegel des Songkörpers — daran misst sich, ob der
+                # Ausklang für eine volle Überblendung laut genug ist.
+                cur_body_db         = audio.body_level_db(song_pcm)
                 # Der Pausenzustand ist mit dem Start aufgebraucht — sonst
                 # würde der Song beim nächsten Play erneut ab hier starten.
                 clear_paused(self.uid)
@@ -838,6 +920,7 @@ class UserStream:
                 bg_skip = asyncio.Event()
 
                 async def _prefetch_next(ns=next_song):
+                    """Nächsten Song im Hintergrund holen UND aufbereiten."""
                     if not ns:
                         return None
                     from .downloader import (get_audio_source as _get_src,
@@ -847,7 +930,13 @@ class UserStream:
                         return None
                     hdrs = (await _get_hdrs(ns.get("artist", ""), ns.get("song", ""))
                             if src.startswith("http") else None)
-                    return await UserStream._decode_pcm(src, bg_skip, hdrs)
+                    pcm = await UserStream._decode_pcm(src, bg_skip, hdrs)
+                    if not pcm:
+                        return None
+                    # Läuft parallel zur Wiedergabe des laufenden Titels —
+                    # der nächste Song ist damit fertig gemessen, wenn die
+                    # Überblendung ansteht.
+                    return await self._process_audio(pcm)
 
                 prefetch_t = (
                     asyncio.create_task(_prefetch_next())
@@ -876,10 +965,12 @@ class UserStream:
                     continue
 
                 # ── Collect prefetch ───────────────────────────────────────
+                next_audio = None
                 next_pcm: bytes | None = None
                 if prefetch_t:
                     try:
-                        next_pcm = await asyncio.wait_for(prefetch_t, timeout=20.0)
+                        next_audio = await asyncio.wait_for(prefetch_t, timeout=30.0)
+                        next_pcm   = next_audio.pcm if next_audio else None
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         logger.warning("[%s] Prefetch timed out — no crossfade", self.uid)
                         # Vermutlich tote/gedrosselte URL: sofort verwerfen,
@@ -896,13 +987,33 @@ class UserStream:
 
                 # ── Write blend + hand off remainder ──────────────────────
                 if next_pcm and tail_pcm and not self._queue_dirty:
-                    blend_n = (min(len(tail_pcm), len(next_pcm), CROSSFADE_BYTES) // 4) * 4
-                    blended = self._blend(tail_pcm[:blend_n], next_pcm[:blend_n])
-                    skipped = await self._write_pcm(encoder, blended)
+                    # Überblendlänge an die Ränder anpassen: ein leises Intro
+                    # oder ein langer Ausklang würden bei voller Länge ein
+                    # hörbares Loch erzeugen (beide Titel gleichzeitig leise).
+                    max_sec = min(len(tail_pcm), len(next_pcm)) / BYTES_PER_SEC
+                    sec     = audio.blend_seconds(
+                        tail_pcm, next_pcm, cur_body_db,
+                        audio.body_level_db(next_pcm),
+                        min(float(CROSSFADE_SEC), max_sec),
+                    )
+                    blend_n = (int(sec * BYTES_PER_SEC) // 4) * 4
+                    if sec < CROSSFADE_SEC:
+                        logger.info("[%s] Überblendung auf %.1fs verkürzt "
+                                    "(leiser Rand)", self.uid, sec)
+
+                    # Der nicht überblendete Teil des Ausklangs läuft normal.
+                    skipped = False
+                    pre = tail_pcm[:len(tail_pcm) - blend_n]
+                    if pre:
+                        skipped = await self._write_pcm(encoder, pre)
+                    if not skipped and blend_n:
+                        blended = self._blend(tail_pcm[-blend_n:], next_pcm[:blend_n])
+                        skipped = await self._write_pcm(encoder, blended)
                     if not skipped and next_song and not self._queue_dirty:
                         prefetched_song   = next_song
                         prefetched_pcm    = next_pcm[blend_n:]
                         prefetched_offset = blend_n / BYTES_PER_SEC
+                        prefetched_lead   = next_audio.lead_trim if next_audio else 0.0
                     elif skipped:
                         self._skip_event.clear()
                 else:
@@ -922,6 +1033,7 @@ class UserStream:
                 logger.debug("[%s] Could not save pause state", self.uid, exc_info=True)
             self.current_song = None
             self._song_pcm    = None
+            self._song_lead   = 0.0
             try:
                 if encoder.stdin and not encoder.stdin.is_closing():
                     encoder.stdin.close()
