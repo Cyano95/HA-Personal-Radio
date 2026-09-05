@@ -287,6 +287,13 @@ body {
 }
 .chip:empty { display: none; }
 
+/* Angefangener Titel wartet an seiner Stelle — Play setzt dort fort. */
+.chip-paused {
+  background: rgba(255,255,255,0.07);
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
 #player-name-label {
   font-size: 12px;
   color: var(--text-faint);
@@ -451,63 +458,94 @@ body {
 #station-search::placeholder { color: var(--text-faint); }
 #station-search:focus { border-color: var(--primary); }
 
+/* Einzeilige Senderliste: jeder Sender belegt genau eine Zeile.
+   Lange Namen werden nicht abgeschnitten, sondern laufen durch (Marquee). */
 #station-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 0 12px 12px;
 }
 
 .station-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: var(--card-2);
   border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 12px 10px;
+  padding: 9px 12px;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   transition: border-color .15s, background .15s, transform .1s;
   user-select: none;
+  overflow: hidden;
 }
 .station-tile:hover  { background: rgba(255,255,255,0.06); }
-.station-tile:active { transform: scale(0.97); }
+.station-tile:active { transform: scale(0.99); }
 .station-tile.selected {
   border-color: var(--primary);
   background: var(--primary-dim);
 }
 
-.station-tile-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.station-tile.selected .station-tile-name { color: var(--primary); }
-
-.station-tile-name::before {
-  content: '';
+.station-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
   background: var(--border-2);
-  flex-shrink: 0;
+  flex: 0 0 auto;
   transition: background .15s;
 }
-.station-tile.selected .station-tile-name::before { background: var(--primary); }
+.station-tile.selected .station-dot { background: var(--primary); }
+
+/* Fenster mit fester Breite — der Text darin wird verschoben. */
+.station-tile-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+          mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent);
+}
+.station-tile-name > span {
+  display: inline-block;
+  white-space: nowrap;
+}
+/* Nur wenn der Name breiter als die Zeile ist (per JS gesetzt). */
+.station-tile-name.is-scrolling > span {
+  animation: station-marquee var(--marquee-dur, 9s) ease-in-out infinite alternate;
+}
+.station-tile-name:not(.is-scrolling) {
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+.station-tile.selected .station-tile-name { color: var(--primary); }
+
+@keyframes station-marquee {
+  0%,  12%  { transform: translateX(0); }
+  88%, 100% { transform: translateX(calc(-1 * var(--marquee-shift, 0px))); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .station-tile-name.is-scrolling > span { animation: none; }
+  .station-tile-name {
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    -webkit-mask-image: none;
+            mask-image: none;
+  }
+}
 
 .station-tile-count {
+  flex: 0 0 auto;
   font-size: 11px;
   color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 .station-tile.selected .station-tile-count { color: rgba(3,169,244,0.65); }
 
 .stations-loading {
-  grid-column: 1/-1;
   padding: 20px;
   text-align: center;
   color: var(--text-faint);

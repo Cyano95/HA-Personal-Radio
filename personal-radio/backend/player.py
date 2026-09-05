@@ -176,8 +176,10 @@ async def stop_playback(uid: str) -> None:
         except Exception as e:
             logger.warning("[%s] Stop failed: %s", uid, e)
 
-    state["is_playing"] = False
-    storage.write_user_state(uid, state)
+    # Nur dieses eine Feld ändern — der übrige Zustand wird frisch gelesen.
+    # (Das komplette state-Dict von oben ist nach dem await veraltet und
+    # würde z.B. eine zwischenzeitlich geänderte Senderauswahl überschreiben.)
+    storage.update_user_state(uid, is_playing=False)
     await _fire_event("personal_radio_stopped", {
         "ha_user_id":       uid,
         "player_entity_id": entity_id,
@@ -199,8 +201,7 @@ async def set_volume(uid: str, volume: float) -> None:
             )
     except Exception as e:
         logger.warning("[%s] Volume failed: %s", uid, e)
-    state["volume"] = volume
-    storage.write_user_state(uid, state)
+    storage.update_user_state(uid, volume=volume)
 
 
 async def _fire_event(event_type: str, data: dict) -> None:
