@@ -25,6 +25,7 @@ Songs are fetched from your Station Log API, resolved via yt-dlp + ffmpeg, and s
 | `media_port` | Port for direct MP3 serving (default: `8788`). Must be reachable by your media players on the local network. |
 | `max_song_minutes` | Maximale Spieldauer eines Titels in Minuten — längere Titel werden nicht gespielt. `0` = unbegrenzt. |
 | `no_repeat_hours` | Spanne in Stunden, in der kein Titel doppelt gespielt wird (gilt **pro Titel über alle Sender hinweg**) (tatsächlich vergangene Zeit, nicht Abspieldauer). `0` = klassische Vollrotation: erst wiederholen, wenn alle Titel des Senders gespielt wurden. Sind alle Titel bereits gespielt, bevor die Spanne abgelaufen ist, darf auch früher wiederholt werden (ältester zuerst). |
+| `icy_metadata` | Titelmetadaten (ICY) in den Stream einbetten — nur für Clients, die sie mit `Icy-MetaData: 1` anfordern. Dann zeigt z.B. ein Internetradio Interpret und Titel im Display. Auf `false` stellen, falls ein Gerät damit nicht klarkommt. Standard: `true`. |
 
 ---
 
@@ -113,6 +114,35 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Eine geänderte Senderauswahl greift auch im laufenden Betrieb **ab dem nächsten Song**; der aktuelle Song läuft ungestört zu Ende.
 - **Stop pausiert den laufenden Titel:** Der Stream wird beendet und der Player gestoppt, die Abspielstelle und das restliche Audio bleiben aber im Cache. Play setzt genau dort fort (ein paar Sekunden Vorlauf, damit nichts verloren geht). Skip/Vor/Zurück verwerfen die Pausenstelle; ist der Titel ohnehin fast zu Ende, beginnt Play mit dem nächsten.
 - Library is pruned to the 10 most recent MP3s (files currently playing are never deleted).
+
+---
+
+## Stream in externen Geräten (Internetradio, VLC, Sonos …)
+
+Die URLs stehen in der Weboberfläche unter **„Stream-URL für externe Geräte"**
+(auch über `GET /api/user/stream_urls`). Der ICY-Server auf Port 8789 bietet
+mehrere Formen derselben Wiedergabe:
+
+| URL | Wofür |
+|-----|-------|
+| `http://<host>:8789/listen/<token>.mp3` | **Hardware-Internetradios.** Kein Query-String, Dateiendung vorhanden — damit kommt auch sparsame Firmware klar. |
+| `http://<host>:8789/listen/<token>.m3u` | Playlist, die auf die `.mp3`-URL zeigt (manche Geräte wollen eine Playlist). |
+| `http://<host>:8789/listen/<token>.pls` | dieselbe Playlist im PLS-Format. |
+| `http://<host>:8789/stream/<uid>?token=<token>` | Bisherige Form; wird von Home Assistant genutzt und bleibt gültig. |
+| `http://<host>:8788/stream/<uid>?token=<token>` | Zum Testen im Browser. |
+
+Der ICY-Server verhält sich wie ein Icecast-Server: Antwort in der HTTP-Version
+der Anfrage, Kopfzeilen `Server`, `Cache-Control`, `Connection: close`,
+`Accept-Ranges: none`, dazu `icy-name`/`icy-genre`/`icy-br`/`icy-pub`.
+
+**`icy-metaint` wird nur gesendet, wenn der Client `Icy-MetaData: 1`
+anfordert** — dann mit Intervall 16000 und eingebetteten `StreamTitle`-Blöcken,
+sodass das Gerät Interpret und Titel anzeigt. Wird der Header ungefragt (oder
+mit dem Wert 0) geschickt, lesen viele Geräte Audiobytes als Metadaten und
+melden „Stream nicht abspielbar" — genau das war bis Version 1.6.0 der Fall.
+
+Kommt ein Gerät mit den Metadaten nicht klar, schaltet die Option
+`icy_metadata: false` sie ab.
 
 ---
 

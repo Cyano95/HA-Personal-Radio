@@ -59,6 +59,8 @@ const D = {
   stationGrid:   document.getElementById('station-grid'),
   pauseChip:     document.getElementById('pause-chip'),
   historyList:   document.getElementById('history-list'),
+  urlsCard:      document.getElementById('urls-card'),
+  urlsList:      document.getElementById('urls-list'),
   toasts:        document.getElementById('toast-container'),
 };
 
@@ -310,6 +312,64 @@ function updateMarquees() {
       el.style.removeProperty('--marquee-dur');
     }
   }
+}
+
+// ── Render: Stream-URLs für externe Geräte ────────────────────────────────────
+// Hardware-Internetradios kommen mit "?token=…" oft nicht klar und erwarten
+// eine Dateiendung — daher stehen die /listen/-Formen zuerst.
+const URL_ROWS = [
+  ['device_mp3', 'Internetradio (direkt)'],
+  ['device_m3u', 'Internetradio (M3U-Playlist)'],
+  ['device_pls', 'Internetradio (PLS-Playlist)'],
+  ['browser',    'Browser / VLC zum Testen'],
+];
+
+let _urlsLoaded = false;
+async function loadStreamUrls() {
+  if (_urlsLoaded) return;
+  const urls = await api('api/user/stream_urls');
+  if (!urls) {
+    D.urlsList.innerHTML = '<div class="stations-loading">URLs nicht verfügbar.</div>';
+    return;
+  }
+  _urlsLoaded = true;
+  D.urlsList.innerHTML = '';
+  for (const [key, label] of URL_ROWS) {
+    if (!urls[key]) continue;
+    const row = document.createElement('div');
+    row.className = 'url-row';
+    row.innerHTML = `
+      <div class="url-info">
+        <div class="url-label">${escHtml(label)}</div>
+        <div class="url-value">${escHtml(urls[key])}</div>
+      </div>
+      <button class="url-copy" type="button">Kopieren</button>
+    `;
+    row.querySelector('.url-copy')
+       .addEventListener('click', e => copyUrl(urls[key], e.currentTarget));
+    D.urlsList.append(row);
+  }
+}
+
+async function copyUrl(text, btn) {
+  let ok = false;
+  try {
+    // Nur im sicheren Kontext (https) verfügbar — sonst Fallback.
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.append(ta);
+    ta.select();
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+  }
+  btn.textContent = ok ? 'Kopiert' : 'Fehlgeschlagen';
+  btn.classList.toggle('copied', ok);
+  setTimeout(() => { btn.textContent = 'Kopieren'; btn.classList.remove('copied'); }, 1800);
+  if (!ok) toast('Kopieren nicht möglich — URL bitte markieren.', true);
 }
 
 // ── Render: History ────────────────────────────────────────────────────────────
@@ -639,6 +699,11 @@ D.playerSelect.addEventListener('change', e => selectPlayer(e.target.value));
 D.search.addEventListener('input', e => {
   S.search = e.target.value;
   renderStations();
+});
+
+// URLs erst beim Aufklappen holen (braucht die HA-Host-Ermittlung).
+D.urlsCard.addEventListener('toggle', () => {
+  if (D.urlsCard.open) loadStreamUrls();
 });
 
 // Schriftarten werden nachgeladen — danach sind die Textbreiten erst final.

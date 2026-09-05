@@ -740,6 +740,30 @@ async def api_nowplaying(request: Request):
     }
 
 
+@app.get("/api/user/stream_urls")
+async def api_stream_urls(request: Request):
+    """
+    URLs zum Eintragen in externe Abspielgeräte.
+
+    Hardware-Internetradios kommen mit Query-Strings oft nicht klar und leiten
+    den Codec aus der Dateiendung ab — dafür gibt es die /listen/-Formen.
+    """
+    uid         = require_user(request)
+    state       = storage.read_user_state(uid)
+    token       = state.get("media_token", "")
+    stream_port = int(os.environ.get("STREAM_PORT", "8789"))
+    media_port  = int(os.environ.get("MEDIA_PORT",  "8788"))
+    host        = await get_ha_host()
+    base        = f"http://{host}:{stream_port}"
+    return {
+        "device_mp3": f"{base}/listen/{token}.mp3",
+        "device_m3u": f"{base}/listen/{token}.m3u",
+        "device_pls": f"{base}/listen/{token}.pls",
+        "icy":        f"{base}/stream/{uid}?token={token}",
+        "browser":    f"http://{host}:{media_port}/stream/{uid}?token={token}",
+    }
+
+
 @app.get("/api/user/players")
 async def api_players(request: Request):
     require_user(request)
@@ -850,6 +874,10 @@ async def api_debug_media(request: Request):
     return {
         "stream_url_icy":              stream_url,
         "stream_url_browser":          browser_url,
+        # Für Hardware-Internetradios: ohne Query-String, mit Dateiendung
+        "stream_url_device_mp3":       f"http://{ha_host}:{stream_port}/listen/{media_token}.mp3",
+        "stream_url_device_m3u":       f"http://{ha_host}:{stream_port}/listen/{media_token}.m3u",
+        "stream_url_device_pls":       f"http://{ha_host}:{stream_port}/listen/{media_token}.pls",
         "health_url":                  health_url,
         "ha_host":                     ha_host,
         "media_port":                  media_port,
@@ -858,7 +886,9 @@ async def api_debug_media(request: Request):
         "media_server_reachable_locally": media_server_ok,
         "yt_id":                       yt_id,
         "player_entity_id":            state.get("player_entity_id"),
-        "tip": "Use stream_url_icy in VLC/media players (HTTP/1.0). Use stream_url_browser to test in a browser tab.",
+        "tip": "Use stream_url_icy in VLC/media players (HTTP/1.0). Use stream_url_browser to test in a browser tab. "
+               "Hardware internet radios should use stream_url_device_mp3 (no query string, .mp3 extension) "
+               "or one of the playlist URLs.",
     }
 
 

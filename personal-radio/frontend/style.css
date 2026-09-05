@@ -662,3 +662,55 @@ details[open] .chevron { transform: rotate(180deg); }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+/* ── Stream-URLs für externe Geräte ────────────────────────────────────────── */
+#urls-card summary { cursor: pointer; list-style: none; }
+#urls-card summary::-webkit-details-marker { display: none; }
+#urls-card[open] .chevron { transform: rotate(180deg); }
+
+.url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+.url-info { flex: 1 1 auto; min-width: 0; }
+.url-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+.url-value {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.url-value::-webkit-scrollbar { display: none; }
+
+.url-copy {
+  flex: 0 0 auto;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.url-copy:hover  { border-color: var(--primary); color: var(--primary); }
+.url-copy.copied { border-color: var(--primary); color: var(--primary); }
+
+#urls-hint {
+  margin: 0;
+  padding: 10px 16px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
