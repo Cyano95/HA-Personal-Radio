@@ -434,7 +434,8 @@ async def restore_paused_song(uid: str) -> dict | None:
         if cur is not None and song_key(cur) == song_key(paused):
             return cur                       # steht bereits an der Reihe
 
-        entry = {k: v for k, v in paused.items() if k != "position"}
+        entry = {k: v for k, v in paused.items()
+                 if k not in ("position", "lead_trim")}
         queue.insert(idx, entry)
         state["queue"]         = queue
         state["current_index"] = idx

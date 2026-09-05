@@ -26,6 +26,9 @@ Songs are fetched from your Station Log API, resolved via yt-dlp + ffmpeg, and s
 | `max_song_minutes` | Maximale Spieldauer eines Titels in Minuten — längere Titel werden nicht gespielt. `0` = unbegrenzt. |
 | `no_repeat_hours` | Spanne in Stunden, in der kein Titel doppelt gespielt wird (gilt **pro Titel über alle Sender hinweg**) (tatsächlich vergangene Zeit, nicht Abspieldauer). `0` = klassische Vollrotation: erst wiederholen, wenn alle Titel des Senders gespielt wurden. Sind alle Titel bereits gespielt, bevor die Spanne abgelaufen ist, darf auch früher wiederholt werden (ältester zuerst). |
 | `icy_metadata` | Titelmetadaten (ICY) in den Stream einbetten — nur für Clients, die sie mit `Icy-MetaData: 1` anfordern. Dann zeigt z.B. ein Internetradio Interpret und Titel im Display. Auf `false` stellen, falls ein Gerät damit nicht klarkommt. Standard: `true`. |
+| `normalize_loudness` | Alle Titel auf dieselbe wahrgenommene Lautstärke bringen. Gemessen wird einmal pro Titel nach ITU-R BS.1770 (LUFS), angewendet wird eine **konstante** Verstärkung — wie ReplayGain. Kein Kompressor, die Dynamik im Titel bleibt vollständig erhalten. Standard: `true`. |
+| `target_loudness` | Ziel-Lautheit in LUFS. `-14` ist der Streaming-Standard (Spotify/YouTube). Niedrigere Werte wie `-18` lassen dynamischen Aufnahmen mehr Reserve. Standard: `-14`. |
+| `trim_silence` | Stille am **Anfang und Ende** eines Titels abschneiden, damit die Überblendung nicht ins Leere läuft. Pausen **innerhalb** eines Titels bleiben unangetastet. Standard: `true`. |
 
 ---
 
@@ -113,7 +116,40 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Die No-Repeat-Spanne zählt ab dem tatsächlichen Abspielbeginn eines Titels und gilt senderübergreifend pro Titel.
 - Eine geänderte Senderauswahl greift auch im laufenden Betrieb **ab dem nächsten Song**; der aktuelle Song läuft ungestört zu Ende.
 - **Stop pausiert den laufenden Titel:** Der Stream wird beendet und der Player gestoppt, die Abspielstelle und das restliche Audio bleiben aber im Cache. Play setzt genau dort fort (ein paar Sekunden Vorlauf, damit nichts verloren geht). Skip/Vor/Zurück verwerfen die Pausenstelle; ist der Titel ohnehin fast zu Ende, beginnt Play mit dem nächsten.
+- Lautheit und Ränder jedes Titels werden vor der Wiedergabe aufbereitet (siehe „Klangaufbereitung").
 - Library is pruned to the 10 most recent MP3s (files currently playing are never deleted).
+
+---
+
+## Klangaufbereitung
+
+Der Producer hat jeden Titel vollständig als PCM im Speicher, bevor er
+abgespielt wird. Deshalb wird nicht live geregelt (ein Kompressor/AGC würde
+pumpen und die Dynamik plätten), sondern **einmal pro Titel gemessen und ein
+konstanter Faktor angewendet** — dasselbe Prinzip wie ReplayGain.
+
+**Lautheit.** Gemessen wird die integrierte Lautheit nach ITU-R BS.1770
+(K-Bewertung, absolutes und relatives Gate), also dasselbe Verfahren wie bei
+`ffmpeg -af ebur128`; die Implementierung stimmt damit auf ±0,25 LU überein.
+Die Anhebung ist auf 12 dB begrenzt und wird zusätzlich durch eine
+Spitzenwertreserve gedeckelt (Ziel −1 dBFS), damit nichts übersteuert.
+
+**Ränder.** Stille am Anfang und Ende wird abgeschnitten. Gesucht wird
+ausschließlich von den Rändern nach innen, deshalb kann eine Pause *innerhalb*
+eines Titels nie als Ende gewertet werden. Höchstens 30 s je Seite.
+
+**Adaptive Überblendung.** Ist der Ausklang des laufenden oder der Anfang des
+nächsten Titels deutlich leiser als der jeweilige Songkörper (sanftes Intro,
+langer Ausklang), würde eine volle 5-Sekunden-Überblendung ein hörbares Loch
+erzeugen — dort wären beide Titel gleichzeitig leise. Die Überblendung wird
+dann verkürzt (3 s / 1,5 s / 0,6 s je nach Pegelabfall), der leise Teil bleibt
+aber vollständig erhalten. Die Blendkurven arbeiten mit konstanter Leistung
+(sin/cos); eine lineare Blende senkt die wahrgenommene Lautstärke in der Mitte
+um ~3 dB.
+
+Die Aufbereitung läuft im Threadpool und für den *nächsten* Titel im
+Hintergrund, während der aktuelle noch spielt — hörbar wird sie nur beim
+allerersten Titel nach dem Start (dort überbrückt die Keepalive-Stille).
 
 ---
 

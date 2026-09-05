@@ -1,6 +1,6 @@
 name: "Personal Radio"
 description: "Personalized radio using your HA media players."
-version: "1.6.0"
+version: "1.7.0"
 slug: personal-radio
 init: false
 
@@ -38,6 +38,16 @@ options:
   # "Icy-MetaData: 1" anfordern — dann zeigt z.B. ein Internetradio den Titel
   # im Display). Auf false stellen, falls ein Gerät damit nicht klarkommt.
   icy_metadata: true
+  # Alle Titel auf dieselbe wahrgenommene Lautstärke bringen (ReplayGain-
+  # Prinzip: einmal pro Titel gemessen, konstante Verstärkung — kein
+  # Kompressor, die Dynamik bleibt erhalten).
+  normalize_loudness: true
+  # Ziel-Lautheit in LUFS. -14 ist der Streaming-Standard; -18 ist leiser
+  # und lässt mehr Reserve für dynamische Aufnahmen.
+  target_loudness: -14
+  # Stille am Anfang/Ende eines Titels abschneiden, damit die Überblendung
+  # nicht ins Leere läuft. Pausen INNERHALB eines Titels bleiben erhalten.
+  trim_silence: true
 
 schema:
   station_api_url: str
@@ -51,6 +61,9 @@ schema:
   max_song_minutes: int
   no_repeat_hours: int
   icy_metadata: bool?
+  normalize_loudness: bool?
+  target_loudness: float?
+  trim_silence: bool?
 
 ports:
   # Web UI + REST API — direkt (außerhalb von HA / ohne Ingress) erreichbar
