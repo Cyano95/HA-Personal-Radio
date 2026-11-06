@@ -265,6 +265,11 @@ class UserStream:
 
     # ── Listener management ───────────────────────────────────────────────
 
+    @property
+    def listeners(self) -> int:
+        """Anzahl verbundener Hörer — auch solche, die wir nicht gestartet haben."""
+        return len(self._subs)
+
     async def subscribe(self) -> asyncio.Queue:
         """
         Connect a new listener.  The subscriber queue is pre-filled with
@@ -285,6 +290,18 @@ class UserStream:
                     self._run_producer(), name=f"producer_{self.uid}"
                 )
         logger.info("[%s] Listener connected (total: %d)", self.uid, len(self._subs))
+        # Ein Gerät kann den Stream auch von sich aus öffnen (URL direkt im
+        # Internetradio eingetragen). Dann läuft Wiedergabe, ohne dass das
+        # Webinterface sie gestartet hat — der Zustand muss das abbilden,
+        # sonst sind dort Stop/Vor/Zurück gesperrt und Play würde einen
+        # zweiten Hörer aufmachen.
+        try:
+            if not storage.read_user_state(self.uid).get("is_playing"):
+                storage.update_user_state(self.uid, is_playing=True)
+                logger.info("[%s] Wiedergabe von außen gestartet — Zustand "
+                            "auf 'spielt' gesetzt", self.uid)
+        except Exception:
+            logger.debug("[%s] Could not flag is_playing on subscribe", self.uid)
         return q
 
     async def unsubscribe(self, q: asyncio.Queue) -> None:

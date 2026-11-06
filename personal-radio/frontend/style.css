@@ -714,3 +714,43 @@ details[open] .chevron { transform: rotate(180deg); }
   line-height: 1.5;
   color: var(--text-faint);
 }
+
+/* ── Gehörte Titel ─────────────────────────────────────────────────────────── */
+#listened-card summary { cursor: pointer; list-style: none; }
+#listened-card summary::-webkit-details-marker { display: none; }
+#listened-card[open] .chevron { transform: rotate(180deg); }
+#listened-card .ha-badge { margin-left: auto; margin-right: 8px; }
+
+.hint-text {
+  margin: 0;
+  padding: 0 16px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+#listened-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 0 16px 12px;
+}
+.stat-item { display: flex; flex-direction: column; gap: 2px; }
+.stat-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.stat-label { font-size: 10.5px; color: var(--text-faint); }
+.stat-value.stat-warn { color: #ffb74d; }
+.stat-value.stat-ok   { color: var(--primary); }
+
+#listened-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+#listened-actions .url-copy { font-size: 12px; padding: 7px 12px; }
+#listened-actions .url-copy:disabled { opacity: .5; cursor: default; }

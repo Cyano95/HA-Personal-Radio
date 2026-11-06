@@ -28,8 +28,15 @@ export ICY_METADATA="$(python3 -c "import json; print('1' if json.load(open('$OP
 export NORMALIZE_LOUDNESS="$(python3 -c "import json; print('1' if json.load(open('$OPTIONS')).get('normalize_loudness', True) else '0')" 2>/dev/null || echo 1)"
 export TRIM_SILENCE="$(python3 -c "import json; print('1' if json.load(open('$OPTIONS')).get('trim_silence', True) else '0')" 2>/dev/null || echo 1)"
 export TARGET_LOUDNESS="$(python3 -c "import json; print(json.load(open('$OPTIONS')).get('target_loudness', -14))" 2>/dev/null || echo -14)"
+export WEBDAV_URL="$(get_option webdav_url)"
+export WEBDAV_USER="$(get_option webdav_user)"
+export WEBDAV_PASSWORD="$(get_option webdav_password)"
+export WEBDAV_INTERVAL_MINUTES="$(get_option webdav_interval_minutes)"
+export WEBDAV_INTERVAL_MINUTES="${WEBDAV_INTERVAL_MINUTES:-30}"
+# Nur den Zustand loggen, nie die Adresse — sie kann Zugangsdaten enthalten.
+if [ -n "$WEBDAV_URL" ]; then WEBDAV_STATE="alle ${WEBDAV_INTERVAL_MINUTES} min"; else WEBDAV_STATE="aus"; fi
 
-echo "[Personal Radio] media_port=${MEDIA_PORT}  stream_port=${STREAM_PORT}  host='${MEDIA_HOST:-auto}'  content_type='${MEDIA_CONTENT_TYPE}'  max_song_minutes=${MAX_SONG_MINUTES}  no_repeat_hours=${NO_REPEAT_HOURS}  icy_metadata=${ICY_METADATA}  normalize=${NORMALIZE_LOUDNESS}@${TARGET_LOUDNESS}LUFS  trim_silence=${TRIM_SILENCE}"
+echo "[Personal Radio] media_port=${MEDIA_PORT}  stream_port=${STREAM_PORT}  host='${MEDIA_HOST:-auto}'  content_type='${MEDIA_CONTENT_TYPE}'  max_song_minutes=${MAX_SONG_MINUTES}  no_repeat_hours=${NO_REPEAT_HOURS}  icy_metadata=${ICY_METADATA}  normalize=${NORMALIZE_LOUDNESS}@${TARGET_LOUDNESS}LUFS  trim_silence=${TRIM_SILENCE}  webdav=${WEBDAV_STATE}"
 
 # ── yt-dlp bei jedem Start aktualisieren ──────────────────────────────────
 # YouTube ändert regelmäßig seine URL-Signaturen; eine veraltete yt-dlp-
