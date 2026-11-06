@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from . import storage
+from . import listened, storage, webdav_sync
 from .api_client import StationAPIClient
 from .downloader import prefetch_for_user
 from .mp3_server import serve_mp3, health as mp3_health
@@ -136,6 +136,27 @@ def _engine_play_lock(uid: str) -> asyncio.Lock:
     return _engine_play_locks[uid]
 
 
+async def _player_plays_our_stream(uid: str) -> bool:
+    """
+    Spielt der konfigurierte HA-Player gerade unseren Stream?
+
+    Entscheidend für den Fall, dass ein anderes Gerät den Stream geöffnet
+    hat: dann läuft zwar Wiedergabe, der eigene Player ist aber nicht dabei.
+    """
+    state     = storage.read_user_state(uid)
+    entity_id = state.get("player_entity_id")
+    if not entity_id:
+        return False
+    pstate = await get_player_state(entity_id)
+    if not isinstance(pstate, dict):
+        return False
+    if pstate.get("state") not in ("playing", "buffering"):
+        return False
+    content = str((pstate.get("attributes") or {}).get("media_content_id") or "")
+    token   = state.get("media_token", "")
+    return bool(token) and token in content
+
+
 class PlaybackEngine:
     async def start_playback(self, uid: str) -> bool:
         lock = _engine_play_lock(uid)
@@ -146,8 +167,18 @@ class PlaybackEngine:
         async with lock:
             state = storage.read_user_state(uid)
             if state.get("is_playing"):
-                logger.debug("[%s] Already playing, ignoring duplicate start_playback", uid)
-                return True
+                # Läuft bereits — das kann aber auch ein Gerät sein, das den
+                # Stream von sich aus geöffnet hat. Spielt der im Webinterface
+                # gewählte Player unseren Stream nicht, bekommt er ihn jetzt
+                # zusätzlich; der laufende Stream wird dabei nicht angefasst.
+                if await _player_plays_our_stream(uid):
+                    logger.debug("[%s] Already playing, ignoring duplicate "
+                                 "start_playback", uid)
+                    return True
+                logger.info("[%s] Stream läuft (externer Hörer) — Player "
+                            "zusätzlich verbinden", uid)
+                await get_or_create_stream(uid)
+                return await play_stream(uid)
 
             # Wurde zuvor gestoppt, wird der angefangene Song wieder an die
             # aktuelle Position gesetzt — der Producer setzt ihn dann an der
@@ -316,6 +347,20 @@ async def startup() -> None:
         fire_event=_fire_event,
         mark_played=mark_song_played,
     )
+
+    # Rotationslisten aus der dauerhaften Liste gehörter Titel aufbauen.
+    # Damit wirkt sie über Neustart und Neuinstallation hinweg, ohne dass
+    # die Auswahl-Logik selbst etwas davon wissen muss.
+    try:
+        info = await asyncio.get_running_loop().run_in_executor(
+            None, listened.rebuild_played_sets, INSTANCE_ID)
+        logger.info("Dauerhafte Hörliste: %d Titel, %d Sender wiederhergestellt",
+                    info.get("songs", 0), info.get("stations", 0))
+    except Exception:
+        logger.exception("Hörliste konnte nicht angewendet werden")
+
+    # WebDAV-Abgleich im Hintergrund (nur wenn konfiguriert)
+    asyncio.create_task(webdav_sync.periodic_sync(INSTANCE_ID))
 
     asyncio.create_task(api_client.run_poll_loop(get_active_stations=_active_stations))
 
@@ -688,17 +733,25 @@ async def api_nowplaying(request: Request):
     song   = (stream.current_song if stream and not stream.stopped else None) \
              or get_current_song(uid)
 
+    # Der Stream ist die Wahrheit: ein Gerät kann ihn auch von sich aus
+    # geöffnet haben. Der gespeicherte Schalter bleibt zusätzlich gültig,
+    # damit die Anzeige zwischen "Play gedrückt" und "Player verbunden"
+    # nicht kurz auf "Bereit" zurückfällt.
+    live_listeners = (stream.listeners
+                      if stream is not None and not stream.stopped else 0)
+    is_playing  = bool(state.get("is_playing", False)) or live_listeners > 0
+
     # Gestoppt, aber ein Song wartet an seiner Pausenstelle → diesen zeigen,
     # damit die UI sagt, wo es beim nächsten Play weitergeht.
     paused_song = state.get("paused_song") or {}
-    is_playing  = state.get("is_playing", False)
     paused      = bool(paused_song) and not is_playing
     if paused:
         song = paused_song
 
-    entity_id   = state.get("player_entity_id")
-    player_name = entity_id
-    volume      = state.get("volume")
+    entity_id     = state.get("player_entity_id")
+    player_name   = entity_id
+    volume        = state.get("volume")
+    player_active = False
     if entity_id:
         # Parallel abfragen, damit die Antwortzeit niedrig bleibt (Boot/Polling)
         players, pstate = await asyncio.gather(
@@ -717,6 +770,13 @@ async def api_nowplaying(request: Request):
             vl = (pstate.get("attributes") or {}).get("volume_level")
             if isinstance(vl, (int, float)):
                 volume = float(vl)
+            # Spielt der konfigurierte Player gerade unseren Stream? Wenn
+            # nicht, kommt die Wiedergabe von einem anderen Gerät — dann
+            # greifen Lautstärkeregler und Player-Auswahl dort nicht.
+            content = str((pstate.get("attributes") or {}).get("media_content_id") or "")
+            token   = state.get("media_token", "")
+            player_active = bool(token) and token in content and \
+                pstate.get("state") in ("playing", "buffering")
 
     return {
         "artist":           song.get("artist")    if song else None,
@@ -727,6 +787,11 @@ async def api_nowplaying(request: Request):
         "player_entity_id": entity_id,
         "player_name":      player_name,
         "is_playing":       is_playing,
+        # Verbundene Hörer und ob der eigene Player darunter ist. Läuft der
+        # Stream nur für ein fremdes Gerät, sagt die UI das — Lautstärke und
+        # Player-Auswahl wirken dann nicht auf das, was gerade zu hören ist.
+        "listeners":        live_listeners,
+        "external_only":    is_playing and not player_active,
         # Angefangener Titel wartet — Play setzt ihn an dieser Stelle fort.
         "paused":           paused,
         "paused_position":  float(paused_song.get("position", 0) or 0) if paused else 0,
@@ -738,6 +803,64 @@ async def api_nowplaying(request: Request):
         "next_ready":       next_is_ready(uid),
         "error":            get_user_error(uid),
     }
+
+
+@app.get("/api/user/listened")
+async def api_listened(request: Request):
+    """Umfang der dauerhaften Hörliste und Stand des WebDAV-Abgleichs."""
+    require_user(request)
+    return {
+        **listened.stats(),
+        "sync": {
+            "configured": webdav_sync.configured(),
+            "interval":   webdav_sync.config()["interval"],
+            **webdav_sync.last_result(),
+        },
+    }
+
+
+@app.post("/api/user/listened/sync")
+async def api_listened_sync(request: Request):
+    uid = require_user(request)
+    res = await webdav_sync.sync_now(uid)
+    if not res.get("ok"):
+        raise HTTPException(status_code=502,
+                            detail=res.get("error") or "Abgleich fehlgeschlagen")
+    return {**res, **listened.stats()}
+
+
+@app.get("/api/user/listened/export")
+async def api_listened_export(request: Request):
+    """Die komplette Liste als Datei — zum Sichern oder Umziehen."""
+    require_user(request)
+    from fastapi.responses import JSONResponse
+    stamp = time.strftime("%Y-%m-%d")
+    return JSONResponse(
+        listened.snapshot(),
+        headers={"Content-Disposition":
+                 f'attachment; filename="personal-radio-gehoert-{stamp}.json"'},
+    )
+
+
+@app.post("/api/user/listened/import")
+async def api_listened_import(request: Request):
+    """
+    Eine exportierte Liste einarbeiten. Additiv — der vorhandene Bestand
+    bleibt erhalten, es gewinnt je Titel der jüngere Zeitstempel.
+    """
+    uid = require_user(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Kein gültiges JSON")
+    try:
+        info = await asyncio.get_running_loop().run_in_executor(
+            None, listened.merge, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await asyncio.get_running_loop().run_in_executor(
+        None, listened.rebuild_played_sets, uid)
+    return {**info, **listened.stats()}
 
 
 @app.get("/api/user/stream_urls")

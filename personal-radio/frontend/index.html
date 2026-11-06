@@ -47,6 +47,7 @@
           <div id="track-meta">
             <span id="station-chip" class="chip"></span>
             <span id="pause-chip" class="chip chip-paused"></span>
+            <span id="device-chip" class="chip chip-paused"></span>
             <span id="player-name-label"></span>
           </div>
         </div>
@@ -94,6 +95,27 @@
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
       </summary>
       <div id="history-list"></div>
+    </details>
+
+    <!-- Gehörte Titel -->
+    <details class="ha-card" id="listened-card">
+      <summary class="ha-card-header ha-card-header--summary">
+        <span class="ha-card-title">Gehörte Titel</span>
+        <span id="listened-count" class="ha-badge"></span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div id="listened-body">
+        <p class="hint-text">Diese Liste verhindert, dass Titel doppelt kommen —
+          auch nach einem Neustart oder einer Neuinstallation. Über WebDAV lässt
+          sie sich zwischen mehreren Installationen abgleichen.</p>
+        <div id="listened-stats"></div>
+        <div id="listened-actions">
+          <button class="url-copy" type="button" id="btn-sync">Jetzt abgleichen</button>
+          <button class="url-copy" type="button" id="btn-export">Exportieren</button>
+          <button class="url-copy" type="button" id="btn-import">Importieren</button>
+          <input type="file" id="import-file" accept="application/json,.json" hidden />
+        </div>
+      </div>
     </details>
 
     <!-- Stream-URLs für externe Geräte -->

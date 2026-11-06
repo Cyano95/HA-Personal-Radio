@@ -29,6 +29,9 @@ Songs are fetched from your Station Log API, resolved via yt-dlp + ffmpeg, and s
 | `normalize_loudness` | Alle Titel auf dieselbe wahrgenommene Lautstärke bringen. Gemessen wird einmal pro Titel nach ITU-R BS.1770 (LUFS), angewendet wird eine **konstante** Verstärkung — wie ReplayGain. Kein Kompressor, die Dynamik im Titel bleibt vollständig erhalten. Standard: `true`. |
 | `target_loudness` | Ziel-Lautheit in LUFS. `-14` ist der Streaming-Standard (Spotify/YouTube). Niedrigere Werte wie `-18` lassen dynamischen Aufnahmen mehr Reserve. Standard: `-14`. |
 | `trim_silence` | Stille am **Anfang und Ende** eines Titels abschneiden, damit die Überblendung nicht ins Leere läuft. Pausen **innerhalb** eines Titels bleiben unangetastet. Standard: `true`. |
+| `webdav_url` | Vollständige Datei-URL für den Abgleich der Hörliste, z.B. `https://cloud.example.org/remote.php/dav/files/ich/radio/gehoert.json`. Leer = kein Abgleich. |
+| `webdav_user` / `webdav_password` | Zugangsdaten für den WebDAV-Server. |
+| `webdav_interval_minutes` | Abstand zwischen zwei Abgleichen (mindestens 5). Standard: `30`. |
 
 ---
 
@@ -116,8 +119,43 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Die No-Repeat-Spanne zählt ab dem tatsächlichen Abspielbeginn eines Titels und gilt senderübergreifend pro Titel.
 - Eine geänderte Senderauswahl greift auch im laufenden Betrieb **ab dem nächsten Song**; der aktuelle Song läuft ungestört zu Ende.
 - **Stop pausiert den laufenden Titel:** Der Stream wird beendet und der Player gestoppt, die Abspielstelle und das restliche Audio bleiben aber im Cache. Play setzt genau dort fort (ein paar Sekunden Vorlauf, damit nichts verloren geht). Skip/Vor/Zurück verwerfen die Pausenstelle; ist der Titel ohnehin fast zu Ende, beginnt Play mit dem nächsten.
+- Öffnet ein Gerät den Stream von sich aus (URL direkt im Internetradio), erkennt das Webinterface das: der Zustand steht auf „spielt", Stop/Vor/Zurück wirken auf den laufenden Stream, und ein Hinweis „Externes Gerät" sagt, dass Lautstärke und Player-Auswahl dort nicht greifen.
 - Lautheit und Ränder jedes Titels werden vor der Wiedergabe aufbereitet (siehe „Klangaufbereitung").
 - Library is pruned to the 10 most recent MP3s (files currently playing are never deleted).
+
+---
+
+## Gehörte Titel (dauerhaft, abgleichbar)
+
+`/data/listened.json` merkt sich jeden tatsächlich abgespielten Titel —
+**nach Interpret und Titel**, nicht nach YouTube-ID, unbefristet und in einer
+einzelnen portablen Datei. Daraus werden beim Start die Rotationslisten wieder
+aufgebaut; die Auswahl-Logik selbst bleibt unverändert, überlebt aber Neustart
+und Neuinstallation.
+
+Warum nicht die bisherigen Listen? `played/<sender>.json` und
+`played_global.json` hängen an der YouTube-ID, werden nach 30 Tagen
+beschnitten und liegen nur im Addon-Verzeichnis. Nach einer Neuinstallation
+war alles weg — und selbst mit Backup half es wenig, weil derselbe Titel beim
+erneuten Auflösen eine andere ID bekommen kann.
+
+In der Oberfläche unter **„Gehörte Titel"**: Umfang, Stand des Abgleichs und
+die Knöpfe *Jetzt abgleichen*, *Exportieren*, *Importieren*.
+
+**WebDAV-Abgleich** (Nextcloud, ownCloud, jeder WebDAV-Server): Bei jedem
+Durchlauf wird die Datei vom Server geholt, **additiv** eingearbeitet (je
+Titel gewinnt der jüngere Zeitstempel, die höhere Zählung bleibt) und der
+zusammengeführte Stand zurückgeschrieben. Dadurch ist die Reihenfolge egal und
+zwei Installationen können parallel hören, ohne sich zu überschreiben.
+Schlägt ein Schritt fehl, bleibt der lokale Bestand unangetastet und der
+Grund steht im Log und in der Oberfläche.
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /api/user/listened` | Umfang und Stand des Abgleichs |
+| `POST /api/user/listened/sync` | sofort abgleichen |
+| `GET /api/user/listened/export` | Liste als Datei herunterladen |
+| `POST /api/user/listened/import` | Liste einarbeiten (additiv) |
 
 ---
 

@@ -58,7 +58,15 @@ const D = {
   search:        document.getElementById('station-search'),
   stationGrid:   document.getElementById('station-grid'),
   pauseChip:     document.getElementById('pause-chip'),
+  deviceChip:    document.getElementById('device-chip'),
   historyList:   document.getElementById('history-list'),
+  listenedCard:  document.getElementById('listened-card'),
+  listenedCount: document.getElementById('listened-count'),
+  listenedStats: document.getElementById('listened-stats'),
+  btnSync:       document.getElementById('btn-sync'),
+  btnExport:     document.getElementById('btn-export'),
+  btnImport:     document.getElementById('btn-import'),
+  importFile:    document.getElementById('import-file'),
   urlsCard:      document.getElementById('urls-card'),
   urlsList:      document.getElementById('urls-list'),
   toasts:        document.getElementById('toast-container'),
@@ -138,6 +146,11 @@ function renderPlayer() {
   D.pauseChip.textContent = paused
     ? `Pausiert · weiter bei ${fmtTime(now.paused_position)}`
     : '';
+  // Der Stream kann auch von einem Gerät geöffnet worden sein, das die URL
+  // direkt eingetragen hat. Dann wirken Lautstärke und Player-Auswahl nicht
+  // auf das, was gerade zu hören ist — das sagt die Anzeige.
+  D.deviceChip.textContent =
+    (isPlaying && now?.external_only && S.pending === null) ? 'Externes Gerät' : '';
 
   // Play button state
   const btnPlayIcon  = D.btnPlay.querySelector('.icon-play');
@@ -312,6 +325,72 @@ function updateMarquees() {
       el.style.removeProperty('--marquee-dur');
     }
   }
+}
+
+// ── Gehörte Titel ─────────────────────────────────────────────────────────────
+function fmtWhen(ts) {
+  if (!ts) return 'nie';
+  const d = new Date(ts * 1000);
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1)    return 'gerade eben';
+  if (mins < 60)   return `vor ${mins} min`;
+  if (mins < 1440) return `vor ${Math.round(mins / 60)} h`;
+  return d.toLocaleDateString('de');
+}
+
+function renderListened(d) {
+  if (!d) return;
+  D.listenedCount.textContent = `${(d.count || 0).toLocaleString('de')}`;
+  const sync = d.sync || {};
+  const items = [
+    ['stat-value', (d.count || 0).toLocaleString('de'), 'Titel gemerkt'],
+    ['stat-value', (d.plays || 0).toLocaleString('de'), 'Wiedergaben'],
+    ['stat-value', fmtWhen(d.last_at), 'zuletzt gehört'],
+  ];
+  if (sync.configured) {
+    const ok = sync.ok === true;
+    items.push([
+      'stat-value ' + (sync.ok === false ? 'stat-warn' : ok ? 'stat-ok' : ''),
+      sync.at ? fmtWhen(sync.at) : 'noch nicht',
+      sync.error ? 'Abgleich fehlgeschlagen' : `WebDAV-Abgleich (alle ${sync.interval} min)`,
+    ]);
+  } else {
+    items.push(['stat-value', 'aus', 'WebDAV nicht eingerichtet']);
+  }
+  D.listenedStats.innerHTML = items.map(([cls, v, l]) =>
+    `<div class="stat-item"><span class="${cls}">${escHtml(v)}</span>` +
+    `<span class="stat-label">${escHtml(l)}</span></div>`).join('');
+  if (sync.error) D.listenedStats.title = sync.error;
+  D.btnSync.disabled = !sync.configured;
+  D.btnSync.title = sync.configured ? '' : 'WebDAV-Adresse in den Addon-Optionen eintragen';
+}
+
+async function loadListened() {
+  renderListened(await api('api/user/listened'));
+}
+
+async function syncListened() {
+  D.btnSync.disabled = true;
+  D.btnSync.textContent = 'Gleiche ab…';
+  const res = await api('api/user/listened/sync', 'POST');
+  D.btnSync.textContent = 'Jetzt abgleichen';
+  if (res) toast(`Abgeglichen — ${res.added || 0} neu, ${res.count || 0} insgesamt.`);
+  else     toast('Abgleich fehlgeschlagen — Details im Addon-Log.', true);
+  await loadListened();
+}
+
+async function importListened(file) {
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch {
+    toast('Datei ist kein gültiges JSON.', true);
+    return;
+  }
+  const res = await api('api/user/listened/import', 'POST', payload);
+  if (res) toast(`Importiert — ${res.added || 0} neu, ${res.count || 0} insgesamt.`);
+  else     toast('Import fehlgeschlagen.', true);
+  await loadListened();
 }
 
 // ── Render: Stream-URLs für externe Geräte ────────────────────────────────────
@@ -699,6 +778,24 @@ D.playerSelect.addEventListener('change', e => selectPlayer(e.target.value));
 D.search.addEventListener('input', e => {
   S.search = e.target.value;
   renderStations();
+});
+
+D.listenedCard.addEventListener('toggle', () => {
+  if (D.listenedCard.open) loadListened();
+});
+D.btnSync.addEventListener('click', syncListened);
+D.btnExport.addEventListener('click', () => {
+  // Ingress-tauglich: relativer Pfad, der Browser lädt die Datei herunter.
+  const a = document.createElement('a');
+  a.href = 'api/user/listened/export';
+  a.download = 'personal-radio-gehoert.json';
+  document.body.append(a); a.click(); a.remove();
+});
+D.btnImport.addEventListener('click', () => D.importFile.click());
+D.importFile.addEventListener('change', e => {
+  const f = e.target.files?.[0];
+  if (f) importListened(f);
+  e.target.value = '';
 });
 
 // URLs erst beim Aufklappen holen (braucht die HA-Host-Ermittlung).

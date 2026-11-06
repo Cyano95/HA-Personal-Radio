@@ -6,7 +6,7 @@ import logging
 import os
 import time
 
-from . import storage
+from . import listened, storage
 from .downloader import get_audio_source, max_song_seconds, prefetch_for_user, resolve_song
 
 logger = logging.getLogger("personal_radio.queue")
@@ -104,14 +104,26 @@ def _pick_song(uid: str, station: str,
         yt_id = cached.get("yt_id")
         if not yt_id:
             return "unplayed"
+        # Dauerhafte Liste (nach Interpret+Titel): überlebt Neustart und
+        # Neuinstallation und greift auch dann, wenn derselbe Titel beim
+        # erneuten Auflösen eine andere YouTube-ID bekommen hat.
+        ts_list = listened.last_played(entry["artist"], entry["song"])
+
         if no_repeat_s > 0:
             # Fenster-Modus: pro Titel, senderübergreifend
             ts = played_g.get(yt_id)
+            if ts_list and (ts is None or ts_list > ts):
+                ts = ts_list
             if ts is None or now - ts >= no_repeat_s:
                 return "unplayed"
             return "played"
+
         # Modus 0: klassische Vollrotation pro Sender
-        return "played" if yt_id in played else "unplayed"
+        if yt_id in played:
+            return "played"
+        if ts_list and ts_list >= listened.cycle_start(station):
+            return "played"
+        return "unplayed"
 
     # ── 1st pass: first unplayed / out-of-window song ──────────────────────
     for entry in _candidates():
@@ -143,6 +155,10 @@ def _pick_song(uid: str, station: str,
     # ── Mode 0: full cycle complete — reset played set ─────────────────────
     logger.info("Cycle complete for station '%s' (uid %s)", station, uid)
     storage.write_played_ids(uid, station, {})
+    # Auch dauerhaft festhalten: alles davor zählt für diesen Sender nicht
+    # mehr als gespielt — sonst stünde nach einem Neustart sofort wieder
+    # die komplette Sperre.
+    listened.start_cycle(station)
     played.clear()                       # _status re-evaluates against empty set
     for entry in _candidates():
         if _status(entry) == "unplayed":
@@ -173,8 +189,15 @@ def mark_song_played(uid: str, song: dict) -> None:
     Vom Stream-Producer beim tatsächlichen Song-Start aufgerufen: setzt den
     Zeitstempel auf den echten Abspielbeginn (statt des Queue-Zeitpunkts),
     damit die No-Repeat-Spanne ab dem Abspielen zählt.
+
+    Nur hier — nicht beim Einreihen — wandert der Titel in die dauerhafte
+    Liste: eingereihte, aber nie gehörte Titel sollen dort nicht auftauchen.
     """
     _mark_played(uid, song.get("station", ""), song.get("yt_id", ""))
+    try:
+        listened.record(song)
+    except Exception:
+        logger.exception("Konnte Titel nicht in die dauerhafte Liste eintragen")
 
 
 def unmark_unplayed(uid: str, entries: list[dict]) -> None:

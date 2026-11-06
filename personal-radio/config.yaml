@@ -1,6 +1,6 @@
 name: "Personal Radio"
 description: "Personalized radio using your HA media players."
-version: "1.7.0"
+version: "1.8.0"
 slug: personal-radio
 init: false
 
@@ -48,6 +48,15 @@ options:
   # Stille am Anfang/Ende eines Titels abschneiden, damit die Überblendung
   # nicht ins Leere läuft. Pausen INNERHALB eines Titels bleiben erhalten.
   trim_silence: true
+  # WebDAV-Abgleich der Liste gehörter Titel. Die Liste verhindert, dass
+  # Titel doppelt kommen — auch nach Neustart oder Neuinstallation und
+  # über mehrere Installationen hinweg. Leer lassen = kein Abgleich.
+  # Vollständige Datei-URL angeben, z.B.
+  # https://cloud.example.org/remote.php/dav/files/ich/radio/gehoert.json
+  webdav_url: ""
+  webdav_user: ""
+  webdav_password: ""
+  webdav_interval_minutes: 30
 
 schema:
   station_api_url: str
@@ -64,6 +73,10 @@ schema:
   normalize_loudness: bool?
   target_loudness: float?
   trim_silence: bool?
+  webdav_url: str?
+  webdav_user: str?
+  webdav_password: password?
+  webdav_interval_minutes: int?
 
 ports:
   # Web UI + REST API — direkt (außerhalb von HA / ohne Ingress) erreichbar
