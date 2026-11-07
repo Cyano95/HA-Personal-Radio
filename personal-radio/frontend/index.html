@@ -72,13 +72,26 @@
       </div>
     </div>
 
-    <!-- Stations Card -->
+    <!-- Warteschlange -->
+    <details class="ha-card" id="queue-card">
+      <summary class="ha-card-header ha-card-header--summary">
+        <span class="ha-card-title">Warteschlange</span>
+        <span id="queue-count" class="ha-badge"></span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div id="queue-list"></div>
+      <div id="queue-actions">
+        <button class="url-copy" type="button" id="btn-queue-clear">Warteschlange leeren</button>
+      </div>
+    </details>
+
+    <!-- Quellen: Sender und Playlists in Abspielreihenfolge -->
     <div class="ha-card" id="stations-card">
       <div class="ha-card-header">
-        <span class="ha-card-title">Sender</span>
+        <span class="ha-card-title">Quellen</span>
         <span id="stations-count" class="ha-badge"></span>
       </div>
-      <div id="selected-chips-row"><div id="selected-chips"></div></div>
+      <div id="source-order"></div>
       <div id="search-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
           <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -87,6 +100,22 @@
       </div>
       <div id="station-grid"></div>
     </div>
+
+    <!-- YouTube: Titel und Playlists suchen -->
+    <details class="ha-card" id="yt-card">
+      <summary class="ha-card-header ha-card-header--summary">
+        <span class="ha-card-title">Auf YouTube suchen</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+      </summary>
+      <div id="yt-search-row">
+        <input type="search" id="yt-query" placeholder="Titel, Interpret oder Playlist…" autocomplete="off" />
+        <button class="url-copy" type="button" id="yt-go">Suchen</button>
+      </div>
+      <p class="hint-text">Playlists lassen sich als Quelle übernehmen und
+        wechseln sich dann mit den Sendern ab. Eine Playlist-Adresse kann auch
+        direkt eingefügt werden.</p>
+      <div id="yt-results"></div>
+    </details>
 
     <!-- History Card -->
     <details class="ha-card" id="history-card">

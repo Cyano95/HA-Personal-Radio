@@ -95,7 +95,10 @@ async def webhook_set_stations(token: str = Query(...), body: StationsBody = Non
     async with get_user_lock(uid):
         state = storage.read_user_state(uid)
         if stations_list != state.get("selected_stations"):
-            state["selected_stations"] = stations_list
+            # Quellenliste mitziehen — Playlists und Reihenfolge bleiben.
+            from . import sources
+            state.update(sources.to_state_fields(
+                sources.apply_station_list(state, stations_list)))
             changed = True
         storage.write_user_state(uid, state)
     # Änderung greift auch im laufenden Betrieb ab dem nächsten Song

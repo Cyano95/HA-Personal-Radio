@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from . import listened, storage, webdav_sync
+from . import listened, sources, storage, webdav_sync, ytsearch
 from .api_client import StationAPIClient
 from .downloader import prefetch_for_user
 from .mp3_server import serve_mp3, health as mp3_health
@@ -44,6 +44,7 @@ from .player import (
 )
 from .queue_manager import (
     advance_queue,
+    apply_source_change,
     apply_station_change,
     ensure_queue_has_entries,
     get_current_song,
@@ -52,6 +53,11 @@ from .queue_manager import (
     go_to_previous,
     mark_song_played,
     next_is_ready,
+    queue_add,
+    queue_clear,
+    queue_move,
+    queue_remove,
+    queue_view,
     restore_paused_song,
     set_user_error,
     unmark_unplayed,
@@ -347,6 +353,18 @@ async def startup() -> None:
         fire_event=_fire_event,
         mark_played=mark_song_played,
     )
+
+    # Quellen-Modell nachziehen: ältere Installationen kennen nur
+    # selected_stations. Daraus wird einmalig die Quellenliste gebaut.
+    try:
+        st = storage.read_user_state(INSTANCE_ID)
+        if not st.get("sources"):
+            storage.update_user_state(
+                INSTANCE_ID,
+                **sources.to_state_fields(sources.from_state(st)))
+            logger.info("Quellenliste aus der bisherigen Senderauswahl erstellt")
+    except Exception:
+        logger.exception("Quellen-Migration fehlgeschlagen")
 
     # Rotationslisten aus der dauerhaften Liste gehörter Titel aufbauen.
     # Damit wirkt sie über Neustart und Neuinstallation hinweg, ohne dass
@@ -672,7 +690,10 @@ async def api_update_user_state(request: Request, body: StateUpdate):
         state = storage.read_user_state(uid)
         if (body.selected_stations is not None
                 and body.selected_stations != state.get("selected_stations")):
-            state["selected_stations"] = body.selected_stations
+            # Alte Schnittstelle: Senderliste setzen. Playlists und die
+            # festgelegte Reihenfolge bleiben dabei erhalten.
+            state.update(sources.to_state_fields(
+                sources.apply_station_list(state, body.selected_stations)))
             stations_changed = True
         if body.player_entity_id is not None:
             state["player_entity_id"] = body.player_entity_id
@@ -686,7 +707,7 @@ async def api_update_user_state(request: Request, body: StateUpdate):
     # Geänderte Senderauswahl greift auch im laufenden Betrieb ab dem
     # nächsten Song — der aktuelle Song wird nicht unterbrochen.
     if stations_changed:
-        asyncio.create_task(apply_station_change(uid))
+        asyncio.create_task(apply_source_change(uid))
     return state
 
 
@@ -803,6 +824,203 @@ async def api_nowplaying(request: Request):
         "next_ready":       next_is_ready(uid),
         "error":            get_user_error(uid),
     }
+
+
+# ---------------------------------------------------------------------------
+# Quellen (Sender + Playlists)
+# ---------------------------------------------------------------------------
+
+def _source_info(src: dict) -> dict:
+    return {**src, "count": sources.pool_size(src)}
+
+
+@app.get("/api/user/sources")
+async def api_sources(request: Request):
+    """Quellen in Abspielreihenfolge."""
+    uid = require_user(request)
+    state = storage.read_user_state(uid)
+    return {
+        "sources": [_source_info(s) for s in sources.from_state(state)],
+        "current": int(state.get("current_station_index", 0) or 0),
+    }
+
+
+class SourceList(BaseModel):
+    sources: list[dict]
+
+
+@app.put("/api/user/sources")
+async def api_sources_set(request: Request, body: SourceList):
+    """
+    Komplette Liste ersetzen — damit laufen Reihenfolge ändern, Ein- und
+    Ausschalten und Entfernen über einen einzigen, konfliktfreien Aufruf.
+    """
+    uid = require_user(request)
+    async with get_user_lock(uid):
+        state  = storage.read_user_state(uid)
+        before = [s["key"] for s in sources.enabled_sources(state)]
+        fields = sources.to_state_fields(body.sources)
+        after  = [s["key"] for s in fields["sources"] if s.get("enabled", True)]
+        # Zeiger auf die Rotation zurücksetzen, wenn sich die Menge ändert
+        if set(before) != set(after):
+            fields["current_station_index"] = 0
+        storage.update_user_state(uid, **fields)
+        changed = before != after
+    if changed:
+        asyncio.create_task(apply_source_change(uid))
+    state = storage.read_user_state(uid)
+    return {"sources": [_source_info(s) for s in sources.from_state(state)]}
+
+
+class SourceRef(BaseModel):
+    key: str
+
+
+@app.post("/api/user/sources/remove")
+async def api_sources_remove(request: Request, body: SourceRef):
+    uid = require_user(request)
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        keep  = [s for s in sources.from_state(state) if s["key"] != body.key]
+        storage.update_user_state(uid, **sources.to_state_fields(keep),
+                                  current_station_index=0)
+    asyncio.create_task(apply_source_change(uid))
+    return {"sources": [_source_info(s)
+                        for s in sources.from_state(storage.read_user_state(uid))]}
+
+
+# ---------------------------------------------------------------------------
+# YouTube: Suche und Playlists
+# ---------------------------------------------------------------------------
+
+@app.get("/api/search")
+async def api_search(request: Request, q: str = Query(...),
+                     kind: str = Query("both")):
+    """Titel- und/oder Playlistsuche über yt-dlp."""
+    require_user(request)
+    query = q.strip()
+    if not query:
+        return {"tracks": [], "playlists": []}
+    want_t = kind in ("both", "tracks")
+    want_p = kind in ("both", "playlists")
+    tracks, playlists = await asyncio.gather(
+        ytsearch.search_tracks(query, 15) if want_t else _empty_list(),
+        ytsearch.search_playlists(query, 8) if want_p else _empty_list(),
+    )
+    return {"tracks": tracks, "playlists": playlists}
+
+
+async def _empty_list() -> list:
+    return []
+
+
+@app.get("/api/suggestions")
+async def api_suggestions(request: Request):
+    """
+    Vorschläge aus den meistgehörten Interpreten. Echte YouTube-Empfehlungen
+    wären nur mit einem API-Schlüssel möglich — das ist hier bewusst nicht
+    der Fall; die Herkunft steht in 'because'.
+    """
+    require_user(request)
+    return {"playlists": await ytsearch.suggestions(8)}
+
+
+class PlaylistRef(BaseModel):
+    value: str = ""          # URL oder Playlist-ID
+    id:    str = ""
+
+
+@app.post("/api/playlists/add")
+async def api_playlist_add(request: Request, body: PlaylistRef):
+    """Playlist holen, speichern und als Quelle ans Ende der Liste setzen."""
+    uid  = require_user(request)
+    data = await ytsearch.fetch_playlist(body.value or body.id)
+    if not data:
+        raise HTTPException(
+            status_code=404,
+            detail="Playlist nicht gefunden oder ohne abspielbare Titel.")
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        srcs  = sources.from_state(state)
+        key   = sources.PLAYLIST_PREFIX + data["id"]
+        srcs  = [s for s in srcs if s["key"] != key]
+        srcs.append(sources.playlist_source(data["id"], data["name"], data["url"]))
+        storage.update_user_state(uid, **sources.to_state_fields(srcs))
+    asyncio.create_task(apply_source_change(uid))
+    return {"playlist": {"id": data["id"], "name": data["name"],
+                         "count": len(data["tracks"])},
+            "sources": [_source_info(s)
+                        for s in sources.from_state(storage.read_user_state(uid))]}
+
+
+@app.post("/api/playlists/refresh")
+async def api_playlist_refresh(request: Request, body: PlaylistRef):
+    """Playlist neu von YouTube holen (neue Titel übernehmen)."""
+    require_user(request)
+    data = await ytsearch.fetch_playlist(body.id or body.value)
+    if not data:
+        raise HTTPException(status_code=404, detail="Playlist nicht erreichbar.")
+    return {"id": data["id"], "name": data["name"], "count": len(data["tracks"])}
+
+
+@app.get("/api/playlists")
+async def api_playlists(request: Request):
+    require_user(request)
+    return storage.list_playlists()
+
+
+# ---------------------------------------------------------------------------
+# Warteschlange
+# ---------------------------------------------------------------------------
+
+@app.get("/api/user/queue")
+async def api_queue(request: Request):
+    return queue_view(require_user(request))
+
+
+class QueuePos(BaseModel):
+    position: int
+    to:       int | None = None
+
+
+@app.post("/api/user/queue/remove")
+async def api_queue_remove(request: Request, body: QueuePos):
+    uid = require_user(request)
+    if not await queue_remove(uid, body.position):
+        raise HTTPException(status_code=404, detail="Platz nicht in der Warteschlange")
+    asyncio.create_task(ensure_queue_has_entries(uid, count=1))
+    return queue_view(uid)
+
+
+@app.post("/api/user/queue/move")
+async def api_queue_move(request: Request, body: QueuePos):
+    uid = require_user(request)
+    if body.to is None or not await queue_move(uid, body.position, body.to):
+        raise HTTPException(status_code=400, detail="Verschieben nicht möglich")
+    return queue_view(uid)
+
+
+class QueueAdd(BaseModel):
+    artist:    str = ""
+    song:      str
+    yt_id:     str | None = None
+    play_next: bool = False
+
+
+@app.post("/api/user/queue/add")
+async def api_queue_add(request: Request, body: QueueAdd):
+    uid  = require_user(request)
+    item = await queue_add(uid, body.artist, body.song, body.yt_id, body.play_next)
+    if not item:
+        raise HTTPException(status_code=404, detail="Titel nicht abspielbar.")
+    return {"added": item, **queue_view(uid)}
+
+
+@app.post("/api/user/queue/clear")
+async def api_queue_clear(request: Request):
+    uid = require_user(request)
+    n = await queue_clear(uid)
+    return {"removed": n, **queue_view(uid)}
 
 
 @app.get("/api/user/listened")

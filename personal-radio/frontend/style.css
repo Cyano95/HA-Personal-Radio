@@ -754,3 +754,130 @@ details[open] .chevron { transform: rotate(180deg); }
 }
 #listened-actions .url-copy { font-size: 12px; padding: 7px 12px; }
 #listened-actions .url-copy:disabled { opacity: .5; cursor: default; }
+
+/* ── Quellen in Abspielreihenfolge ────────────────────────────────────────── */
+#source-order { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+
+.src-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--card-2);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 7px 8px 7px 10px;
+  overflow: hidden;
+}
+.src-row.off { opacity: .5; }
+.src-row.playlist { border-left: 3px solid var(--primary); }
+
+.src-pos {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  min-width: 14px;
+}
+.src-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.src-meta { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+
+.icon-btn {
+  flex: 0 0 auto;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.icon-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.icon-btn:disabled { opacity: .3; cursor: default; }
+.icon-btn.danger:hover { border-color: #ef5350; color: #ef5350; }
+
+.sources-empty, .queue-empty, .yt-empty {
+  padding: 14px 16px;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+/* ── Warteschlange ────────────────────────────────────────────────────────── */
+#queue-card summary { cursor: pointer; list-style: none; }
+#queue-card summary::-webkit-details-marker { display: none; }
+#queue-card[open] .chevron { transform: rotate(180deg); }
+#queue-card .ha-badge { margin-left: auto; margin-right: 8px; }
+
+#queue-list { display: flex; flex-direction: column; }
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  border-top: 1px solid var(--border);
+}
+.queue-row.now { background: var(--primary-dim); }
+.queue-info { flex: 1 1 auto; min-width: 0; }
+.queue-song {
+  font-size: 13px; color: var(--text); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.queue-sub {
+  font-size: 10.5px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#queue-actions { padding: 10px 16px 14px; }
+
+/* ── YouTube-Suche ────────────────────────────────────────────────────────── */
+#yt-card summary { cursor: pointer; list-style: none; }
+#yt-card summary::-webkit-details-marker { display: none; }
+#yt-card[open] .chevron { transform: rotate(180deg); }
+
+#yt-search-row { display: flex; gap: 8px; padding: 0 16px 10px; }
+#yt-query {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 8px 12px;
+  outline: none;
+}
+#yt-query:focus { border-color: var(--primary); }
+
+.yt-group-title {
+  padding: 10px 16px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.yt-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 16px;
+  border-top: 1px solid var(--border);
+}
+.yt-info { flex: 1 1 auto; min-width: 0; }
+.yt-title {
+  font-size: 13px; color: var(--text); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.yt-sub {
+  font-size: 10.5px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.yt-row .url-copy { font-size: 11px; padding: 5px 9px; }

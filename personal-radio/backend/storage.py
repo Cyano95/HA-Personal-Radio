@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ DATA_ROOT = Path("/data")
 LIBRARY_DIR = DATA_ROOT / "library"
 CACHE_DIR = DATA_ROOT / "cache"
 STATIONS_DIR = DATA_ROOT / "stations"
+PLAYLISTS_DIR = DATA_ROOT / "playlists"
 USERS_DIR = DATA_ROOT / "users"
 
 YT_CACHE_PATH = CACHE_DIR / "yt_ids.json"
@@ -26,7 +28,7 @@ STATION_CURSORS_PATH = DATA_ROOT / "station_cursors.json"
 
 def ensure_dirs() -> None:
     """Create all necessary data directories."""
-    for d in [LIBRARY_DIR, CACHE_DIR, STATIONS_DIR, USERS_DIR]:
+    for d in [LIBRARY_DIR, CACHE_DIR, STATIONS_DIR, PLAYLISTS_DIR, USERS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -108,6 +110,54 @@ def append_to_station_pool(station: str, entries: list[dict]) -> None:
             pool.append(entry)
             existing.add(key)
     write_json(station_pool_path(station), pool)
+
+
+# ---------------------------------------------------------------------------
+# Playlist helpers
+# ---------------------------------------------------------------------------
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def safe_name(value: str) -> str:
+    """Beliebige Kennung → Dateiname (YouTube-IDs enthalten - und _)."""
+    return _UNSAFE.sub("_", str(value or ""))[:120] or "unbenannt"
+
+
+def playlist_path(pl_id: str) -> Path:
+    return PLAYLISTS_DIR / f"{safe_name(pl_id)}.json"
+
+
+def read_playlist(pl_id: str) -> dict | None:
+    return read_json(playlist_path(pl_id), default=None)
+
+
+def write_playlist(pl_id: str, data: dict) -> None:
+    write_json(playlist_path(pl_id), data)
+
+
+def delete_playlist(pl_id: str) -> None:
+    try:
+        playlist_path(pl_id).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def list_playlists() -> list[dict]:
+    out = []
+    if not PLAYLISTS_DIR.exists():
+        return out
+    for f in sorted(PLAYLISTS_DIR.glob("*.json")):
+        data = read_json(f, default=None)
+        if isinstance(data, dict) and data.get("id"):
+            out.append({
+                "id":         data["id"],
+                "name":       data.get("name", data["id"]),
+                "url":        data.get("url", ""),
+                "fetched_at": data.get("fetched_at", 0),
+                "count":      len(data.get("tracks", [])),
+            })
+    return out
 
 
 # ---------------------------------------------------------------------------
