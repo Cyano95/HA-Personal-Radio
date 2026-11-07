@@ -50,6 +50,10 @@ logger = logging.getLogger("personal_radio.listened")
 FILE_VERSION = 1
 _lock = threading.Lock()
 _cache: dict | None = None
+# {yt_id: zuletzt gehört} — damit zählt dieselbe Aufnahme auch dann als
+# gehört, wenn sie unter abweichender Schreibweise eingereiht wird
+# ("Song" vs. "Song (Remastered)"), was die Senderlogs regelmäßig liefern.
+_by_id: dict[str, float] | None = None
 
 _WS = re.compile(r"\s+")
 
@@ -75,6 +79,25 @@ def _empty() -> dict:
     return {"version": FILE_VERSION, "updated_at": 0, "cycles": {}, "songs": {}}
 
 
+def _ids() -> dict[str, float]:
+    """Index nach Video-ID, bei Bedarf aufgebaut."""
+    global _by_id
+    if _by_id is None:
+        idx: dict[str, float] = {}
+        for e in _load().get("songs", {}).values():
+            yt_id = str(e.get("y", "") or "")
+            if not yt_id:
+                continue
+            try:
+                ts = float(e.get("t", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if ts > idx.get(yt_id, 0):
+                idx[yt_id] = ts
+        _by_id = idx
+    return _by_id
+
+
 def _load() -> dict:
     global _cache
     if _cache is None:
@@ -96,9 +119,10 @@ def _save() -> None:
 
 def reload_from_disk() -> None:
     """Cache verwerfen — nach einem Import oder Abgleich von außen."""
-    global _cache
+    global _cache, _by_id
     with _lock:
         _cache = None
+        _by_id = None
 
 
 # ── Schreiben ────────────────────────────────────────────────────────────────
@@ -123,6 +147,9 @@ def record(song: dict, ts: float | None = None) -> None:
             "n": int(entry.get("n", 0) or 0) + 1,
         })
         data["songs"][k] = entry
+        yt_id = entry.get("y") or ""
+        if yt_id and _by_id is not None and ts > _by_id.get(yt_id, 0):
+            _by_id[yt_id] = float(ts)
         _save()
 
 
@@ -138,7 +165,10 @@ def start_cycle(station: str, ts: float | None = None) -> None:
         return
     with _lock:
         data = _load()
-        data["cycles"][station] = int(ts if ts is not None else time.time())
+        # Mit Nachkommastellen: bei ganzen Sekunden galt ein Titel, der in
+        # derselben Sekunde lief wie der Rundenstart, noch als gespielt —
+        # dann lieferte die Quelle für den Rest der Sekunde gar nichts.
+        data["cycles"][station] = round(float(ts if ts is not None else time.time()), 3)
         _save()
 
 
@@ -160,6 +190,36 @@ def cycle_start(station: str) -> float:
         return float(_load()["cycles"].get(station, 0) or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def ensure_cycle(station: str) -> float:
+    """
+    Rundenbeginn einer Quelle — fehlt er, beginnt die Runde jetzt.
+
+    Ohne das stünde eine frisch hinzugefügte Quelle bei 0: alles jemals
+    Gehörte zählte für sie als gespielt, der erste Zugriff löste sofort
+    einen Rundenneustart aus und die dauerhafte Liste war für diese Quelle
+    damit wirkungslos.
+    """
+    if not station:
+        return 0.0
+    cur = cycle_start(station)
+    if cur > 0:
+        return cur
+    now = round(time.time(), 3)
+    with _lock:
+        data = _load()
+        if not data["cycles"].get(station):
+            data["cycles"][station] = now
+            _save()
+        return float(data["cycles"][station])
+
+
+def last_played_id(yt_id: str) -> float | None:
+    """Wann lief diese Aufnahme (Video-ID) zuletzt? None = noch nie."""
+    if not yt_id:
+        return None
+    return _ids().get(yt_id) or None
 
 
 def stats() -> dict:
@@ -247,6 +307,8 @@ def merge(remote: Any) -> dict:
                     data["cycles"][st] = ts
 
         _save()
+    global _by_id
+    _by_id = None
     return {"added": added, "updated": updated, "total": len(data["songs"])}
 
 

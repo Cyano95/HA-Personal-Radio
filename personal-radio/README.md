@@ -25,6 +25,7 @@ Songs are fetched from your Station Log API, resolved via yt-dlp + ffmpeg, and s
 | `media_port` | Port for direct MP3 serving (default: `8788`). Must be reachable by your media players on the local network. |
 | `max_song_minutes` | Maximale Spieldauer eines Titels in Minuten — längere Titel werden nicht gespielt. `0` = unbegrenzt. |
 | `no_repeat_hours` | Spanne in Stunden, in der kein Titel doppelt gespielt wird (gilt **pro Titel über alle Sender hinweg**) (tatsächlich vergangene Zeit, nicht Abspieldauer). `0` = klassische Vollrotation: erst wiederholen, wenn alle Titel des Senders gespielt wurden. Sind alle Titel bereits gespielt, bevor die Spanne abgelaufen ist, darf auch früher wiederholt werden (ältester zuerst). |
+| `min_repeat_hours` | **Harte Untergrenze:** derselbe Titel kommt innerhalb dieser Spanne nicht erneut — unabhängig vom Rotationsmodus und über alle Quellen, Geräte und Neuinstallationen hinweg (Grundlage ist die dauerhafte Hörliste). Greift auch, wenn derselbe Titel unter abweichender Schreibweise in mehreren Quellen steht. `0` = aus. Standard: `4`. |
 | `icy_metadata` | Titelmetadaten (ICY) in den Stream einbetten — nur für Clients, die sie mit `Icy-MetaData: 1` anfordern. Dann zeigt z.B. ein Internetradio Interpret und Titel im Display. Auf `false` stellen, falls ein Gerät damit nicht klarkommt. Standard: `true`. |
 | `normalize_loudness` | Alle Titel auf dieselbe wahrgenommene Lautstärke bringen. Gemessen wird einmal pro Titel nach ITU-R BS.1770 (LUFS), angewendet wird eine **konstante** Verstärkung — wie ReplayGain. Kein Kompressor, die Dynamik im Titel bleibt vollständig erhalten. Standard: `true`. |
 | `target_loudness` | Ziel-Lautheit in LUFS. `-14` ist der Streaming-Standard (Spotify/YouTube). Niedrigere Werte wie `-18` lassen dynamischen Aufnahmen mehr Reserve. Standard: `-14`. |
@@ -115,6 +116,8 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Es wird immer genau **ein** Song im Voraus vorbereitet (aufgelöst und während des laufenden Titels vordekodiert für den Crossfade).
 - Es gibt genau **eine Instanz** (Queue, History, Media-Token) — keine Benutzertrennung.
 - Die Station-Log-API wird **1x pro Stunde** komplett abgefragt; läuft der Player, werden die gerade abgespielten Sender zusätzlich **1x pro Minute** abgefragt.
+- Dubletten werden erst NACH dem Auflösen endgültig geprüft — vorher ist die YouTube-ID bei Senderpool-Einträgen nicht bekannt. Steht dieselbe Aufnahme in zwei Quellen oder unter zwei Schreibweisen, wird sie nur einmal eingereiht.
+- Liefert eine Quelle nichts (erschöpft, alles gesperrt), rückt die Rotation zur nächsten Quelle weiter. Erst wenn **keine** Quelle etwas hat, wird als letzte Rettung wiederholt — der laufende und der unmittelbar nächste Titel bleiben dabei immer tabu.
 - Rotation: mit `no_repeat_hours: 0` wird ein Song erst wiederholt, wenn alle Titel des Senders gespielt wurden. Mit einem Wert > 0 wird ein Song innerhalb dieser Spanne (Wanduhrzeit) nicht wiederholt — außer alle Titel wurden bereits gespielt, dann darf früher wiederholt werden.
 - Titel mit einer Spieldauer über `max_song_minutes` Minuten werden nie gespielt.
 - Die No-Repeat-Spanne zählt ab dem tatsächlichen Abspielbeginn eines Titels und gilt senderübergreifend pro Titel.
@@ -201,6 +204,13 @@ Warum nicht die bisherigen Listen? `played/<sender>.json` und
 beschnitten und liegen nur im Addon-Verzeichnis. Nach einer Neuinstallation
 war alles weg — und selbst mit Backup half es wenig, weil derselbe Titel beim
 erneuten Auflösen eine andere ID bekommen kann.
+
+Die Liste wirkt auf zwei Wegen: Beim Start werden daraus die Rotationslisten wieder
+aufgebaut, und `min_repeat_hours` sperrt denselben Titel zusätzlich quellen- und
+geräteübergreifend. Diese Sperre ist nötig, weil die Vollrotation (`no_repeat_hours: 0`)
+pro Quelle und nach Video-ID arbeitet — sie kann einen Titel also nicht erkennen, der
+über eine andere Quelle, unter abweichender Schreibweise oder auf einem anderen Gerät
+lief. Nachgeschlagen wird dafür sowohl nach Interpret+Titel als auch nach Video-ID.
 
 In der Oberfläche unter **„Gehörte Titel"**: Umfang, Stand des Abgleichs und
 die Knöpfe *Jetzt abgleichen*, *Exportieren*, *Importieren*.

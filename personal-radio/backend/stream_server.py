@@ -738,6 +738,7 @@ class UserStream:
                 # ── Get current song + PCM ─────────────────────────────────
                 song_offset_s = 0.0
                 lead_trim     = 0.0
+                is_resume     = False
                 if prefetched_song is not None and prefetched_pcm is not None:
                     song          = prefetched_song
                     song_pcm      = prefetched_pcm
@@ -816,6 +817,7 @@ class UserStream:
                             continue
 
                     song_offset_s = resume_at
+                    is_resume     = resume_at > 0
 
                     # ── Lautheit angleichen, Ränder beschneiden ───────────
                     if song_pcm and not processed:
@@ -927,7 +929,9 @@ class UserStream:
 
                 # ── Advance queue; start background prefetch ───────────────
                 if _cb_advance_queue:
-                    await _cb_advance_queue(self.uid, song)
+                    # is_resume: nur dann unterdrückt advance_queue den
+                    # History-Eintrag (der Titel steht dort schon).
+                    await _cb_advance_queue(self.uid, song, resumed=is_resume)
                 if _cb_ensure_queue:
                     asyncio.create_task(_cb_ensure_queue(self.uid, count=1))
 

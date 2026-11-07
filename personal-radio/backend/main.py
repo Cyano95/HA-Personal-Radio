@@ -249,16 +249,42 @@ class PlaybackEngine:
         await ha_set_volume(uid, volume)
 
     async def _prefetch(self, uid: str) -> None:
+        """
+        Den nächsten Titel vorab auflösen und die gewonnenen Angaben
+        (Video-ID, Bilder) in die Warteschlange übernehmen.
+
+        Zusammengeführt wird nach IDENTITÄT, nicht nach Position: zwischen
+        dem Lesen und dem Zurückschreiben liegt eine yt-dlp-Auflösung von
+        mehreren Sekunden, in der die Warteschlange bearbeitet worden sein
+        kann. Ein positionsweiser Rückschreiber hätte dort gelöschte Titel
+        wiederbelebt und Einträge verschoben.
+        """
         state = storage.read_user_state(uid)
-        queue = state.get("queue", [])
-        idx   = state.get("current_index", 0)
+        queue = [dict(e) for e in state.get("queue", [])]
+        idx   = int(state.get("current_index", 0) or 0)
         await prefetch_for_user(uid, queue, idx)
+
+        def _key(e: dict) -> tuple[str, str]:
+            return (str(e.get("artist", "")).lower(), str(e.get("song", "")).lower())
+
+        updates = {
+            _key(e): {k: e.get(k, "") for k in ("yt_id", "thumbnail", "cover_url")}
+            for e in queue
+        }
         async with get_user_lock(uid):
-            state2 = storage.read_user_state(uid)
-            for i, item in enumerate(queue):
-                if i < len(state2["queue"]):
-                    state2["queue"][i] = item
-            storage.write_user_state(uid, state2)
+            fresh   = storage.read_user_state(uid)
+            q2      = fresh.get("queue", [])
+            changed = False
+            for item in q2:
+                upd = updates.get(_key(item))
+                if not upd:
+                    continue            # zwischenzeitlich entfernt
+                for k, v in upd.items():
+                    if v and item.get(k) != v:
+                        item[k] = v
+                        changed = True
+            if changed:
+                storage.update_user_state(uid, queue=q2)
 
 
 engine = PlaybackEngine()
