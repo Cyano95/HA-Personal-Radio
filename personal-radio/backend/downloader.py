@@ -68,12 +68,18 @@ def _mb_semaphore() -> asyncio.Semaphore:
 # yt-dlp stream URL resolution (sync, runs in executor)
 # ---------------------------------------------------------------------------
 
-def _resolve_stream_url_sync(artist: str, song: str) -> dict | None:
+def _resolve_stream_url_sync(artist: str, song: str,
+                             yt_id: str | None = None) -> dict | None:
     """
     Use yt-dlp to find the best audio stream URL — no download.
     Returns dict with yt_id, stream_url, thumbnail, duration or None on failure.
+
+    *yt_id*: bei Playlist-Titeln ist die Video-ID bereits bekannt — dann wird
+    direkt das Video aufgelöst statt zu suchen. Das ist schneller und trifft
+    garantiert den gemeinten Titel.
     """
-    query = f"ytsearch1:{artist} {song}"
+    query = (f"https://www.youtube.com/watch?v={yt_id}" if yt_id
+             else f"ytsearch1:{artist} {song}")
     # Suchfilter: Obergrenze anheben, wenn der Nutzer längere Titel erlaubt.
     # Die eigentliche Durchsetzung von max_song_seconds passiert NACH dem
     # Resolve anhand der gecachten Dauer (nicht-destruktiv: wird das Limit
@@ -85,10 +91,13 @@ def _resolve_stream_url_sync(artist: str, song: str) -> dict | None:
         "quiet":         True,
         "no_warnings":   True,
         "noplaylist":    True,
-        "match_filter":  yt_dlp.utils.match_filter_func(
-                             f"duration >= 60 & duration <= {upper}"
-                         ),
     }
+    if not yt_id:
+        # Nur bei der Suche filtern: eine ausdrücklich gewählte Video-ID
+        # soll nicht an einer Längenregel scheitern. Die Obergrenze aus
+        # max_song_minutes greift ohnehin später anhand der Dauer.
+        opts["match_filter"] = yt_dlp.utils.match_filter_func(
+            f"duration >= 60 & duration <= {upper}")
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(query, download=False)
@@ -210,7 +219,8 @@ async def _fetch_cover_url(artist: str, song: str, yt_thumbnail: str) -> str:
 # Main entry points
 # ---------------------------------------------------------------------------
 
-async def resolve_song(artist: str, song: str) -> dict | None:
+async def resolve_song(artist: str, song: str,
+                       yt_id: str | None = None) -> dict | None:
     """
     Resolve a song to a playable source, returning full metadata for the queue.
     Does NOT download — resolves a stream URL if no local file exists.
@@ -262,8 +272,14 @@ async def resolve_song(artist: str, song: str) -> dict | None:
                 and entry.get("stream_url_expires_at", 0) > now + STREAM_URL_MARGIN):
             return dict(entry)
 
-        logger.info("Resolving stream URL: %s — %s", artist, song)
-        result = await loop.run_in_executor(None, _resolve_stream_url_sync, artist, song)
+        # Eine bereits bekannte Video-ID (Playlist) weiterreichen, sonst die
+        # zwischengespeicherte verwenden — erneut suchen muss man nur, wenn
+        # gar keine bekannt ist.
+        known = yt_id or (entry or {}).get("yt_id") or None
+        logger.info("Resolving stream URL: %s — %s%s", artist, song,
+                    f" (Video {known})" if known else "")
+        result = await loop.run_in_executor(
+            None, _resolve_stream_url_sync, artist, song, known)
 
         if result is None:
             logger.warning("Resolve permanently failed: %s — %s", artist, song)

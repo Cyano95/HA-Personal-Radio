@@ -24,6 +24,8 @@ const S = {
   userState: null,    // /api/user/state
   stations:  [],      // /api/stations
   players:   [],      // /api/user/players
+  sources:   [],      // /api/user/sources — Sender + Playlists, geordnet
+  queue:     null,    // /api/user/queue
   history:   [],      // /api/user/history
 
   // Optimistic / UI state
@@ -53,7 +55,15 @@ const D = {
   btnPrev:       document.getElementById('btn-prev'),
   btnSkip:       document.getElementById('btn-skip'),
   volSlider:     document.getElementById('volume-slider'),
-  selectedChips: document.getElementById('selected-chips'),
+  sourceOrder:   document.getElementById('source-order'),
+  queueCard:     document.getElementById('queue-card'),
+  queueCount:    document.getElementById('queue-count'),
+  queueList:     document.getElementById('queue-list'),
+  btnQueueClear: document.getElementById('btn-queue-clear'),
+  ytCard:        document.getElementById('yt-card'),
+  ytQuery:       document.getElementById('yt-query'),
+  ytGo:          document.getElementById('yt-go'),
+  ytResults:     document.getElementById('yt-results'),
   stationsCount: document.getElementById('stations-count'),
   search:        document.getElementById('station-search'),
   stationGrid:   document.getElementById('station-grid'),
@@ -206,31 +216,68 @@ function renderPlayers() {
   }
 }
 
-// ── Render: Selected chips ─────────────────────────────────────────────────────
-function renderSelectedChips() {
-  const selected = S.userState?.selected_stations || [];
-  D.selectedChips.innerHTML = '';
-
-  if (!selected.length) {
-    const el = document.createElement('span');
-    el.className = 'sel-chips-empty';
-    el.textContent = 'Keine Sender ausgewählt';
-    D.selectedChips.append(el);
+// ── Quellen in Abspielreihenfolge ─────────────────────────────────────────────
+// Sender und Playlists sind gleichwertig: die Liste bestimmt, in welcher
+// Reihenfolge reihum ein Titel geholt wird.
+function renderSources() {
+  const list = S.sources || [];
+  const act  = list.filter(x => x.enabled !== false).length;
+  D.stationsCount.textContent = list.length
+    ? (act === list.length ? `${list.length}` : `${act} / ${list.length}`) : '0';
+  D.stationsCount.title = `${act} von ${list.length} Quellen aktiv`;
+  D.sourceOrder.innerHTML = '';
+  if (!list.length) {
+    D.sourceOrder.innerHTML =
+      '<div class="sources-empty">Noch keine Quelle — Sender unten auswählen ' +
+      'oder eine YouTube-Playlist hinzufügen.</div>';
     return;
   }
+  list.forEach((src, i) => {
+    const row = document.createElement('div');
+    row.className = 'src-row' + (src.enabled === false ? ' off' : '') +
+                    (src.kind === 'playlist' ? ' playlist' : '');
+    const name = src.kind === 'playlist' ? src.name : formatStationName(src.name);
+    row.innerHTML = `
+      <span class="src-pos">${i + 1}</span>
+      <span class="src-name" title="${escHtml(name)}">${escHtml(name)}</span>
+      <span class="src-meta">${(src.count || 0).toLocaleString('de')} Titel</span>
+      <button class="icon-btn" data-act="up"   title="Nach oben"  ${i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="icon-btn" data-act="down" title="Nach unten" ${i === list.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="icon-btn" data-act="toggle" title="${src.enabled === false ? 'Einschalten' : 'Pausieren'}">${src.enabled === false ? '○' : '●'}</button>
+      <button class="icon-btn danger" data-act="remove" title="Entfernen">×</button>
+    `;
+    row.querySelectorAll('.icon-btn').forEach(btn =>
+      btn.addEventListener('click', () => sourceAction(btn.dataset.act, i)));
+    D.sourceOrder.append(row);
+  });
+}
 
-  for (const name of selected) {
-    const chip = document.createElement('span');
-    chip.className = 'sel-chip';
-    const label = document.createTextNode(formatStationName(name));
-    const x = document.createElement('span');
-    x.className = 'sel-chip-x';
-    x.textContent = '×';
-    x.title = 'Entfernen';
-    x.addEventListener('click', e => { e.stopPropagation(); toggleStation(name); });
-    chip.append(label, x);
-    D.selectedChips.append(chip);
+async function sourceAction(act, i) {
+  const list = (S.sources || []).map(s => ({ ...s }));
+  if (!list[i]) return;
+  if (act === 'remove') {
+    const res = await api('api/user/sources/remove', 'POST', { key: list[i].key });
+    if (res) { S.sources = res.sources; renderSources(); renderStations(true); }
+    else toast('Quelle konnte nicht entfernt werden.', true);
+    return;
   }
+  if (act === 'up'   && i > 0)                list.splice(i - 1, 0, list.splice(i, 1)[0]);
+  if (act === 'down' && i < list.length - 1)  list.splice(i + 1, 0, list.splice(i, 1)[0]);
+  if (act === 'toggle') list[i].enabled = list[i].enabled === false;
+  await saveSources(list);
+}
+
+async function saveSources(list) {
+  S.sources = list;                     // sofort anzeigen
+  renderSources();
+  const res = await api('api/user/sources', 'PUT', { sources: list });
+  if (!res) { toast('Reihenfolge konnte nicht gespeichert werden.', true); await loadSources(); }
+  else { S.sources = res.sources; renderSources(); renderStations(true); }
+}
+
+async function loadSources() {
+  const res = await api('api/user/sources');
+  if (res) { S.sources = res.sources; renderSources(); }
 }
 
 // ── Render: Station list ───────────────────────────────────────────────────────
@@ -245,7 +292,10 @@ function renderStations(force = false) {
     !q || s.station.toLowerCase().includes(q) || formatStationName(s.station).toLowerCase().includes(q)
   );
 
-  D.stationsCount.textContent = `${selected.size} / ${S.stations.length}`;
+  const act = (S.sources || []).filter(x => x.enabled !== false).length;
+  const all = (S.sources || []).length;
+  D.stationsCount.textContent = all ? (act === all ? `${all}` : `${act} / ${all}`) : '0';
+  D.stationsCount.title = `${act} von ${all} Quellen aktiv`;
 
   if (!list.length && !S.stations.length) {
     _stationsSig = 'loading';
@@ -325,6 +375,165 @@ function updateMarquees() {
       el.style.removeProperty('--marquee-dur');
     }
   }
+}
+
+// ── Warteschlange ─────────────────────────────────────────────────────────────
+function fmtDur(sec) {
+  if (!sec) return '';
+  const t = Math.round(sec);
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+function renderQueue() {
+  const q = S.queue;
+  if (!q) return;
+  D.queueCount.textContent = q.count || 0;
+  const rows = [];
+  if (q.current) {
+    rows.push(`
+      <div class="queue-row now">
+        <div class="queue-info">
+          <div class="queue-song">${escHtml(q.current.song || '')}</div>
+          <div class="queue-sub">${escHtml(q.current.artist || '')} · läuft gerade</div>
+        </div>
+      </div>`);
+  }
+  if (!q.upcoming?.length) {
+    rows.push('<div class="queue-empty">Nichts eingereiht — wird beim Abspielen ' +
+              'automatisch aus den Quellen nachgefüllt.</div>');
+  }
+  D.queueList.innerHTML = rows.join('');
+
+  (q.upcoming || []).forEach((it, i, arr) => {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    const sub = [it.artist, it.source_name, fmtDur(it.duration)].filter(Boolean).join(' · ');
+    row.innerHTML = `
+      <div class="queue-info">
+        <div class="queue-song">${escHtml(it.song || '')}</div>
+        <div class="queue-sub">${escHtml(sub)}</div>
+      </div>
+      <button class="icon-btn" data-act="up"   title="Nach vorn"  ${i === 0 ? 'disabled' : ''}>↑</button>
+      <button class="icon-btn" data-act="down" title="Nach hinten" ${i === arr.length - 1 ? 'disabled' : ''}>↓</button>
+      <button class="icon-btn danger" data-act="remove" title="Entfernen">×</button>
+    `;
+    row.querySelectorAll('.icon-btn').forEach(btn =>
+      btn.addEventListener('click', () => queueAction(btn.dataset.act, it.position)));
+    D.queueList.append(row);
+  });
+}
+
+async function queueAction(act, pos) {
+  let res = null;
+  if (act === 'remove')    res = await api('api/user/queue/remove', 'POST', { position: pos });
+  else if (act === 'up')   res = await api('api/user/queue/move', 'POST', { position: pos, to: pos - 1 });
+  else if (act === 'down') res = await api('api/user/queue/move', 'POST', { position: pos, to: pos + 1 });
+  if (res) { S.queue = res; renderQueue(); }
+  else toast('Änderung an der Warteschlange fehlgeschlagen.', true);
+}
+
+async function loadQueue() {
+  const res = await api('api/user/queue');
+  if (res) { S.queue = res; renderQueue(); }
+}
+
+// ── YouTube-Suche ─────────────────────────────────────────────────────────────
+async function ytSearch() {
+  const q = D.ytQuery.value.trim();
+  if (!q) return;
+  D.ytGo.disabled = true;
+  D.ytResults.innerHTML = '<div class="yt-empty">Suche läuft…</div>';
+
+  // Eine eingefügte Playlist-Adresse direkt übernehmen statt zu suchen
+  if (/[?&]list=|^https?:\/\/.*youtube|^PL[A-Za-z0-9_-]{10,}/.test(q)) {
+    const res = await api('api/playlists/add', 'POST', { value: q });
+    D.ytGo.disabled = false;
+    if (res) {
+      S.sources = res.sources; renderSources();
+      D.ytResults.innerHTML = '';
+      toast(`Playlist „${res.playlist.name}" übernommen (${res.playlist.count} Titel).`);
+      return;
+    }
+    D.ytResults.innerHTML = '<div class="yt-empty">Playlist nicht erreichbar.</div>';
+    return;
+  }
+
+  const res = await api(`api/search?q=${encodeURIComponent(q)}`);
+  D.ytGo.disabled = false;
+  if (!res) {
+    D.ytResults.innerHTML = '<div class="yt-empty">Suche fehlgeschlagen.</div>';
+    return;
+  }
+  renderYtResults(res);
+}
+
+function renderYtResults(res) {
+  D.ytResults.innerHTML = '';
+  const tracks = res.tracks || [], playlists = res.playlists || [];
+  if (!tracks.length && !playlists.length) {
+    D.ytResults.innerHTML = '<div class="yt-empty">Keine Treffer.</div>';
+    return;
+  }
+  if (playlists.length) {
+    D.ytResults.insertAdjacentHTML('beforeend',
+      '<div class="yt-group-title">Playlists</div>');
+    for (const pl of playlists) {
+      const row = document.createElement('div');
+      row.className = 'yt-row';
+      row.innerHTML = `
+        <div class="yt-info">
+          <div class="yt-title">${escHtml(pl.name)}</div>
+          <div class="yt-sub">${escHtml([pl.uploader, pl.count ? pl.count + ' Titel' : '']
+                                        .filter(Boolean).join(' · '))}</div>
+        </div>
+        <button class="url-copy" type="button">Als Quelle</button>`;
+      row.querySelector('button').addEventListener('click', e => addPlaylist(pl, e.currentTarget));
+      D.ytResults.append(row);
+    }
+  }
+  if (tracks.length) {
+    D.ytResults.insertAdjacentHTML('beforeend',
+      '<div class="yt-group-title">Titel</div>');
+    for (const tr of tracks) {
+      const row = document.createElement('div');
+      row.className = 'yt-row';
+      const sub = [tr.artist, fmtDur(tr.duration)].filter(Boolean).join(' · ');
+      row.innerHTML = `
+        <div class="yt-info">
+          <div class="yt-title">${escHtml(tr.song || tr.title)}</div>
+          <div class="yt-sub">${escHtml(sub)}</div>
+        </div>
+        <button class="url-copy" data-next="1" type="button">Als nächstes</button>
+        <button class="url-copy" type="button">Ans Ende</button>`;
+      row.querySelectorAll('button').forEach(btn =>
+        btn.addEventListener('click', () => addTrack(tr, !!btn.dataset.next, btn)));
+      D.ytResults.append(row);
+    }
+  }
+}
+
+async function addPlaylist(pl, btn) {
+  btn.disabled = true; btn.textContent = 'Lade…';
+  const res = await api('api/playlists/add', 'POST', { value: pl.id });
+  btn.disabled = false; btn.textContent = res ? 'Hinzugefügt' : 'Als Quelle';
+  if (res) {
+    S.sources = res.sources; renderSources();
+    toast(`„${res.playlist.name}" übernommen (${res.playlist.count} Titel).`);
+  } else toast('Playlist konnte nicht übernommen werden.', true);
+}
+
+async function addTrack(tr, playNext, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  const res = await api('api/user/queue/add', 'POST', {
+    artist: tr.artist, song: tr.song, yt_id: tr.yt_id, play_next: playNext,
+  });
+  btn.disabled = false;
+  btn.textContent = res ? 'Eingereiht' : label;
+  if (res) {
+    S.queue = res; renderQueue();
+    toast(playNext ? 'Spielt als nächstes.' : 'Ans Ende der Warteschlange gesetzt.');
+  } else toast('Titel konnte nicht eingereiht werden.', true);
 }
 
 // ── Gehörte Titel ─────────────────────────────────────────────────────────────
@@ -484,7 +693,7 @@ function renderHistory() {
 // ── Full render ────────────────────────────────────────────────────────────────
 function render() {
   renderPlayer();
-  renderSelectedChips();
+  renderSources();
   renderStations();
 }
 
@@ -725,6 +934,9 @@ async function pollAll() {
   if (players) { S.players = players; renderPlayers(); }
   if (hist)    { S.history = hist;   renderHistory(); }
   render();
+  // Quellen und Warteschlange nur holen, wenn sie auch sichtbar sind.
+  loadSources();
+  if (D.queueCard.open) loadQueue();
 }
 
 async function pollStations() {
@@ -743,6 +955,7 @@ async function init() {
 
   // Load stations separately (can be slow)
   pollStations();
+  loadSources();
 
   // First full load
   await pollAll();
@@ -779,6 +992,15 @@ D.search.addEventListener('input', e => {
   S.search = e.target.value;
   renderStations();
 });
+
+D.queueCard.addEventListener('toggle', () => { if (D.queueCard.open) loadQueue(); });
+D.btnQueueClear.addEventListener('click', async () => {
+  const res = await api('api/user/queue/clear', 'POST');
+  if (res) { S.queue = res; renderQueue(); toast(`${res.removed} Titel entfernt.`); }
+  else toast('Leeren fehlgeschlagen.', true);
+});
+D.ytGo.addEventListener('click', ytSearch);
+D.ytQuery.addEventListener('keydown', e => { if (e.key === 'Enter') ytSearch(); });
 
 D.listenedCard.addEventListener('toggle', () => {
   if (D.listenedCard.open) loadListened();

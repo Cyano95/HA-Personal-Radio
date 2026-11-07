@@ -111,6 +111,7 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
                                          HA media_player entity
 ```
 
+- Sender und Playlists sind gleichwertige Quellen; die Reihenfolge der Liste bestimmt, wie sie sich abwechseln.
 - Es wird immer genau **ein** Song im Voraus vorbereitet (aufgelöst und während des laufenden Titels vordekodiert für den Crossfade).
 - Es gibt genau **eine Instanz** (Queue, History, Media-Token) — keine Benutzertrennung.
 - Die Station-Log-API wird **1x pro Stunde** komplett abgefragt; läuft der Player, werden die gerade abgespielten Sender zusätzlich **1x pro Minute** abgefragt.
@@ -122,6 +123,68 @@ Station Log API  ──(poll 1x/h; playing stations 1x/min)──►  Local stat
 - Öffnet ein Gerät den Stream von sich aus (URL direkt im Internetradio), erkennt das Webinterface das: der Zustand steht auf „spielt", Stop/Vor/Zurück wirken auf den laufenden Stream, und ein Hinweis „Externes Gerät" sagt, dass Lautstärke und Player-Auswahl dort nicht greifen.
 - Lautheit und Ränder jedes Titels werden vor der Wiedergabe aufbereitet (siehe „Klangaufbereitung").
 - Library is pruned to the 10 most recent MP3s (files currently playing are never deleted).
+
+---
+
+## Quellen: Sender und Playlists
+
+Sender und YouTube-Playlists sind gleichwertige **Quellen**. Reihum wird aus
+jeder Quelle der nächste Titel geholt — die Reihenfolge in der Liste bestimmt
+also, wie sich die Quellen abwechseln. Jede Quelle lässt sich verschieben,
+pausieren (bleibt in der Liste, liefert aber nichts) oder entfernen.
+
+Playlists werden einmal über yt-dlp aufgelöst und als Titelvorrat unter
+`/data/playlists/<id>.json` abgelegt. Ihre Titel bringen die Video-ID schon
+mit, die Suche entfällt dort also. Rotation, No-Repeat-Spanne und die
+dauerhafte Hörliste gelten für Playlists genauso wie für Sender.
+
+`selected_stations` wird weiter mitgeführt (abgeleitet aus den Sender-Quellen),
+damit Webhooks, die HA-Integration und bestehende Automationen unverändert
+funktionieren.
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /api/user/sources` | Quellen in Abspielreihenfolge |
+| `PUT /api/user/sources` | ganze Liste ersetzen (Reihenfolge, Ein/Aus) |
+| `POST /api/user/sources/remove` | Quelle entfernen |
+
+## Auf YouTube suchen
+
+Titel- und Playlistsuche über **yt-dlp**, ohne API-Schlüssel und ohne
+Kontingent. Gesuchte Titel lassen sich direkt einreihen (als nächstes oder ans
+Ende), gefundene Playlists als Quelle übernehmen; eine Playlist-Adresse kann
+auch direkt eingefügt werden.
+
+Echte YouTube-Empfehlungen gibt es damit nicht — die setzen die YouTube Data
+API voraus. `GET /api/suggestions` leitet Vorschläge stattdessen aus den
+meistgehörten Interpreten ab und nennt in `because`, worauf ein Vorschlag
+beruht.
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /api/search?q=…&kind=both\|tracks\|playlists` | Suche |
+| `POST /api/playlists/add` | Playlist holen und als Quelle setzen |
+| `POST /api/playlists/refresh` | Playlist neu einlesen |
+| `GET /api/playlists` | gespeicherte Playlists |
+
+## Warteschlange
+
+Die Karte **Warteschlange** zeigt den laufenden Titel und alles, was folgt,
+mit Herkunft und Spieldauer. Einträge lassen sich verschieben, einzeln
+entfernen oder alle leeren; nachgefüllt wird automatisch aus den Quellen.
+
+Bereits gespielte Titel werden nie angetastet. Entfernte, nie gehörte Titel
+gibt das Addon für Rotation und Sperrfrist wieder frei — sie gelten also
+nicht als gehört. Betrifft eine Änderung den unmittelbar nächsten Titel,
+verwirft der Producer seinen Vorgriff, damit sie sofort greift.
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /api/user/queue` | laufender Titel + kommende (Platz 0 = als nächstes) |
+| `POST /api/user/queue/move` | `{position, to}` |
+| `POST /api/user/queue/remove` | `{position}` |
+| `POST /api/user/queue/add` | `{artist, song, yt_id?, play_next}` |
+| `POST /api/user/queue/clear` | kommende Titel verwerfen |
 
 ---
 

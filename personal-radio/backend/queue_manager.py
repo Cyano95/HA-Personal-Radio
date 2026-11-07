@@ -6,7 +6,7 @@ import logging
 import os
 import time
 
-from . import listened, storage
+from . import listened, sources, storage
 from .downloader import get_audio_source, max_song_seconds, prefetch_for_user, resolve_song
 
 logger = logging.getLogger("personal_radio.queue")
@@ -47,8 +47,14 @@ def set_user_error(uid: str, msg: str | None) -> None:
 # Song selection — newest-first, duplicate-aware
 # ---------------------------------------------------------------------------
 
-def _pick_song(uid: str, station: str,
-               exclude_ids: set[str] | None = None) -> dict | None:
+def _as_source(source) -> dict:
+    """Bequemlichkeit: ein blanker Sendername zählt als Sender-Quelle."""
+    if isinstance(source, str):
+        return sources.station_source(source)
+    return source
+
+
+def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | None:
     """
     Walk the station pool from NEWEST to OLDEST (reverse insertion order).
 
@@ -61,7 +67,9 @@ def _pick_song(uid: str, station: str,
     When every unique song has been played, the played-set is reset and we
     start the cycle over from the newest entry again.
     """
-    pool = storage.read_station_pool(station)
+    source  = _as_source(source)
+    station = source.get("key", "")
+    pool    = sources.pool_entries(source)
     if not pool:
         return None
 
@@ -84,7 +92,8 @@ def _pick_song(uid: str, station: str,
             seen.add(key)
             if exclude_ids:
                 cached = cache.get(storage.yt_cache_key(entry["artist"], entry["song"]))
-                if cached and cached.get("yt_id") in exclude_ids:
+                known  = (cached or {}).get("yt_id") or entry.get("yt_id")
+                if known and known in exclude_ids:
                     continue    # Titel läuft gerade / ist schon eingereiht
             if max_sec > 0:
                 cached = cache.get(storage.yt_cache_key(entry["artist"], entry["song"]))
@@ -97,11 +106,13 @@ def _pick_song(uid: str, station: str,
         """'unplayed' | 'played' | 'failed'"""
         key    = storage.yt_cache_key(entry["artist"], entry["song"])
         cached = cache.get(key)
-        if not cached:
+        # Playlist-Titel bringen ihre Video-ID mit — damit zählt auch ein
+        # noch nicht aufgelöster Titel korrekt als gehört/ungehört.
+        yt_id  = (cached or {}).get("yt_id") or entry.get("yt_id")
+        if not cached and not yt_id:
             return "unplayed"          # not yet resolved → treat as unplayed
-        if cached.get("failed"):
+        if cached and cached.get("failed"):
             return "failed"
-        yt_id = cached.get("yt_id")
         if not yt_id:
             return "unplayed"
         # Dauerhafte Liste (nach Interpret+Titel): überlebt Neustart und
@@ -153,7 +164,7 @@ def _pick_song(uid: str, station: str,
         return best
 
     # ── Mode 0: full cycle complete — reset played set ─────────────────────
-    logger.info("Cycle complete for station '%s' (uid %s)", station, uid)
+    logger.info("Cycle complete for source '%s' (uid %s)", station, uid)
     storage.write_played_ids(uid, station, {})
     # Auch dauerhaft festhalten: alles davor zählt für diesen Sender nicht
     # mehr als gespielt — sonst stünde nach einem Neustart sofort wieder
@@ -250,7 +261,7 @@ def unmark_unplayed(uid: str, entries: list[dict]) -> None:
 # Queue population
 # ---------------------------------------------------------------------------
 
-async def _build_next_song_entry(uid: str, station: str,
+async def _build_next_song_entry(uid: str, source,
                                  exclude_ids: set[str] | None = None) -> dict | None:
     """
     Pick and resolve the next song for a station.
@@ -259,20 +270,24 @@ async def _build_next_song_entry(uid: str, station: str,
     verhindert, dass derselbe Titel direkt hintereinander kommt, wenn er
     in mehreren ausgewählten Sendern vorkommt.
     """
-    pool = storage.read_station_pool(station)
+    source  = _as_source(source)
+    station = source.get("key", "")
+    pool    = sources.pool_entries(source)
 
     loop = asyncio.get_running_loop()
     for _ in range(min(5, max(1, len(pool)))):
         # _pick_song liest die (potentiell großen) Pool-Dateien synchron —
         # im Executor, damit der Audio-Producer nicht blockiert (Stottern).
-        entry = await loop.run_in_executor(None, _pick_song, uid, station, exclude_ids)
+        entry = await loop.run_in_executor(None, _pick_song, uid, source, exclude_ids)
         if not entry and exclude_ids:
             # Fallback: lieber wiederholen als Stille (z.B. Mini-Pools)
-            entry = await loop.run_in_executor(None, _pick_song, uid, station, None)
+            entry = await loop.run_in_executor(None, _pick_song, uid, source, None)
         if not entry:
             return None
 
-        result = await resolve_song(entry["artist"], entry["song"])
+        # Playlist-Titel bringen die Video-ID mit — dann entfällt die Suche.
+        result = await resolve_song(entry["artist"], entry["song"],
+                                    yt_id=entry.get("yt_id"))
         if result:
             # Spieldauer-Limit erst nach dem Resolve prüfbar. Zu lange Titel
             # werden NICHT als gespielt markiert — die gecachte Dauer sorgt
@@ -298,7 +313,11 @@ async def _build_next_song_entry(uid: str, station: str,
                 "thumbnail": result.get("thumbnail", ""),
                 "cover_url": result.get("cover_url", ""),
                 "duration":  result.get("duration"),
-                "station":   station,
+                # "station" bleibt der Quellen-Schlüssel — daran hängen die
+                # Played-Dateien und die dauerhafte Hörliste.
+                "station":     station,
+                "source_kind": source.get("kind", sources.KIND_STATION),
+                "source_name": sources.display_name(source),
                 "queued_at": int(time.time()),
             }
         # resolve_song already marked this as failed in the cache
@@ -310,8 +329,8 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
     """Ensure at least *count* songs after current_index are queued."""
     async with get_user_lock(uid):
         state    = storage.read_user_state(uid)
-        stations = state.get("selected_stations", [])
-        if not stations:
+        active   = sources.enabled_sources(state)
+        if not active:
             return
 
         queue         = state.get("queue", [])
@@ -321,7 +340,8 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
         if needed <= 0:
             return
 
-        station_idx = state.get("current_station_index", 0)
+        # Reihum über die Quellen in der vom Nutzer festgelegten Reihenfolge
+        station_idx = int(state.get("current_station_index", 0) or 0)
         all_failed  = True
 
         # Titel, die gerade laufen oder schon eingereiht sind, nicht erneut
@@ -332,16 +352,17 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
         }
 
         for _ in range(needed):
-            station     = stations[station_idx % len(stations)]
-            station_idx = (station_idx + 1) % len(stations)
-            item        = await _build_next_song_entry(uid, station, exclude_ids)
+            source      = active[station_idx % len(active)]
+            station_idx = (station_idx + 1) % len(active)
+            item        = await _build_next_song_entry(uid, source, exclude_ids)
             if item:
                 queue.append(item)
                 if item.get("yt_id"):
                     exclude_ids.add(item["yt_id"])
                 all_failed = False
             else:
-                logger.warning("[%s] No song available from '%s'", uid, station)
+                logger.warning("[%s] No song available from '%s'",
+                               uid, sources.display_name(source))
 
         # Nur die beiden geänderten Felder schreiben: zwischen dem Lesen oben
         # und hier liegen lange Auflösungen (yt-dlp) — ein kompletter
@@ -352,14 +373,14 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
         )
 
         if all_failed and needed > 0:
-            set_user_error(uid, "All songs in all stations failed to resolve.")
+            set_user_error(uid, "Kein Titel aus den gewählten Quellen abspielbar.")
         else:
             set_user_error(uid, None)
 
 
-async def apply_station_change(uid: str) -> None:
+async def apply_source_change(uid: str) -> None:
     """
-    Senderauswahl wurde geändert: alle noch nicht gespielten Queue-Einträge
+    Quellenauswahl wurde geändert: alle noch nicht gespielten Queue-Einträge
     verwerfen, damit die neue Auswahl ab dem NÄCHSTEN Song greift. Der
     aktuell laufende Song wird nicht angefasst (sein PCM ist bereits im
     Stream-Producer) und läuft ungestört zu Ende.
@@ -387,6 +408,10 @@ async def apply_station_change(uid: str) -> None:
     # Queue im Hintergrund mit der neuen Auswahl auffüllen
     # (nicht innerhalb des Locks — ensure_queue_has_entries lockt selbst).
     await ensure_queue_has_entries(uid, count=1)
+
+
+# Alter Name — Webhooks und HA-Integration rufen ihn weiterhin auf.
+apply_station_change = apply_source_change
 
 
 def _same_song(a: dict | None, b: dict | None) -> bool:
@@ -527,3 +552,147 @@ def next_is_ready(uid: str) -> bool:
         cached.get("stream_url")
         and cached.get("stream_url_expires_at", 0) > time.time() + 60
     )
+
+
+# ---------------------------------------------------------------------------
+# Warteschlange ansehen und bearbeiten
+# ---------------------------------------------------------------------------
+#
+# Während der Wiedergabe zeigt current_index bereits auf den NÄCHSTEN Titel
+# (der Producer schiebt den Zeiger beim Songstart weiter). Die Warteschlange
+# ist daher queue[current_index:]; alles davor ist Vergangenheit und wird von
+# diesen Funktionen nie angefasst. Positionen nach außen zählen ab 0 = als
+# nächstes.
+
+def _invalidate_prefetch(uid: str) -> None:
+    """
+    Der Producer hat den nächsten Titel womöglich schon vordekodiert.
+    Nach einer Änderung an der Warteschlange muss er das verwerfen, sonst
+    liefe trotzdem noch der alte "nächste" Titel.
+    """
+    try:
+        from .stream_server import _streams
+        stream = _streams.get(uid)
+        if stream and not stream.stopped:
+            stream.invalidate_upcoming()
+    except Exception:
+        logger.debug("[%s] Prefetch konnte nicht verworfen werden", uid)
+
+
+def queue_view(uid: str) -> dict:
+    """Kommende Titel (0 = als nächstes) plus der gerade laufende."""
+    state = storage.read_user_state(uid)
+    queue = state.get("queue", [])
+    idx   = max(0, min(int(state.get("current_index", 0) or 0), len(queue)))
+    upcoming = [
+        {
+            "position":    i,
+            "artist":      e.get("artist", ""),
+            "song":        e.get("song", ""),
+            "yt_id":       e.get("yt_id", ""),
+            "duration":    e.get("duration"),
+            "thumbnail":   e.get("thumbnail", ""),
+            "source_name": e.get("source_name") or e.get("station", ""),
+            "source_kind": e.get("source_kind", "station"),
+        }
+        for i, e in enumerate(queue[idx:])
+    ]
+    current = None
+    try:
+        from .stream_server import _streams
+        stream = _streams.get(uid)
+        if stream and not stream.stopped and stream.current_song:
+            current = dict(stream.current_song)
+    except Exception:
+        pass
+    return {"current": current, "upcoming": upcoming, "count": len(upcoming)}
+
+
+async def queue_remove(uid: str, position: int) -> bool:
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        queue = state.get("queue", [])
+        idx   = int(state.get("current_index", 0) or 0)
+        at    = idx + int(position)
+        if not (idx <= at < len(queue)):
+            return False
+        removed = queue.pop(at)
+        storage.update_user_state(uid, queue=queue)
+    # Nie gespielt → für Rotation und Sperrfrist wieder freigeben
+    unmark_unplayed(uid, [removed])
+    if int(position) == 0:
+        _invalidate_prefetch(uid)
+    logger.info("[%s] Aus der Warteschlange entfernt: %s — %s",
+                uid, removed.get("artist", ""), removed.get("song", ""))
+    return True
+
+
+async def queue_move(uid: str, position: int, to: int) -> bool:
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        queue = state.get("queue", [])
+        idx   = int(state.get("current_index", 0) or 0)
+        n     = len(queue) - idx
+        if n <= 1:
+            return False
+        frm = int(position)
+        dst = max(0, min(int(to), n - 1))
+        if not (0 <= frm < n) or frm == dst:
+            return False
+        item = queue.pop(idx + frm)
+        queue.insert(idx + dst, item)
+        storage.update_user_state(uid, queue=queue)
+    if 0 in (int(position), int(to)):
+        _invalidate_prefetch(uid)
+    return True
+
+
+async def queue_clear(uid: str) -> int:
+    async with get_user_lock(uid):
+        state   = storage.read_user_state(uid)
+        queue   = state.get("queue", [])
+        idx     = int(state.get("current_index", 0) or 0)
+        dropped = queue[idx:]
+        storage.update_user_state(uid, queue=queue[:idx])
+    unmark_unplayed(uid, dropped)
+    _invalidate_prefetch(uid)
+    # Sofort wieder auffüllen, damit nach dem laufenden Titel etwas folgt
+    await ensure_queue_has_entries(uid, count=1)
+    return len(dropped)
+
+
+async def queue_add(uid: str, artist: str, song: str,
+                    yt_id: str | None = None, play_next: bool = False) -> dict | None:
+    """
+    Einen Titel von Hand einreihen (aus der Suche).
+
+    Die Quelle bleibt leer: ein von Hand gewählter Titel gehört zu keinem
+    Sender und keiner Playlist, soll also auch keine Rotationsliste
+    beeinflussen. In der dauerhaften Hörliste landet er trotzdem.
+    """
+    result = await resolve_song(artist, song, yt_id=yt_id)
+    if not result:
+        return None
+    item = {
+        "artist":      artist,
+        "song":        song,
+        "yt_id":       result.get("yt_id", yt_id or ""),
+        "thumbnail":   result.get("thumbnail", ""),
+        "cover_url":   result.get("cover_url", ""),
+        "duration":    result.get("duration"),
+        "station":     "",
+        "source_kind": "manual",
+        "source_name": "Von Hand",
+        "queued_at":   int(time.time()),
+    }
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        queue = state.get("queue", [])
+        idx   = max(0, min(int(state.get("current_index", 0) or 0), len(queue)))
+        queue.insert(idx if play_next else len(queue), item)
+        storage.update_user_state(uid, queue=queue)
+    if play_next:
+        _invalidate_prefetch(uid)
+    logger.info("[%s] Eingereiht (%s): %s — %s", uid,
+                "als nächstes" if play_next else "ans Ende", artist, song)
+    return item
