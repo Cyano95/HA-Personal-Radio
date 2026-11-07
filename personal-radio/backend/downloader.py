@@ -412,7 +412,10 @@ async def prefetch_for_user(uid: str, queue: list[dict], current_index: int) -> 
             for i in range(current_index + 1,
                            min(current_index + 2, len(queue))):
                 item = queue[i]
-                result = await resolve_song(item["artist"], item["song"])
+                # Bekannte Video-ID mitgeben (Playlist-Titel), sonst würde
+                # hier gesucht und womöglich eine andere Aufnahme gewählt.
+                result = await resolve_song(item["artist"], item["song"],
+                                            yt_id=item.get("yt_id") or None)
                 if result:
                     item["yt_id"]     = result.get("yt_id", "")
                     item["thumbnail"] = result.get("thumbnail", "")

@@ -25,6 +25,24 @@ def _no_repeat_seconds() -> float:
         hours = 0.0
     return max(0.0, hours) * 3600.0
 
+def _min_repeat_seconds() -> float:
+    """
+    Harte Untergrenze: derselbe Titel kommt innerhalb dieser Spanne nicht
+    erneut — unabhängig vom Rotationsmodus.
+
+    Die Vollrotation (no_repeat_hours = 0) arbeitet pro Quelle und mit
+    Video-IDs; sie kann einen Titel daher nicht erkennen, der über eine
+    andere Quelle, unter abweichender Schreibweise oder auf einem anderen
+    Gerät lief. Diese Sperre schiebt sich als zusätzliche Bedingung davor
+    und macht die dauerhafte Hörliste in jedem Modus wirksam.
+    """
+    try:
+        hours = float(os.environ.get("MIN_REPEAT_HOURS", "4") or 0)
+    except (TypeError, ValueError):
+        hours = 4.0
+    return max(0.0, hours) * 3600.0
+
+
 _user_locks:  dict[str, asyncio.Lock] = {}
 _user_errors: dict[str, str | None]   = {}
 
@@ -54,7 +72,8 @@ def _as_source(source) -> dict:
     return source
 
 
-def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | None:
+def _pick_song(uid: str, source, exclude_ids: set[str] | None = None,
+               skip_keys: set | None = None, relaxed: bool = False) -> dict | None:
     """
     Walk the station pool from NEWEST to OLDEST (reverse insertion order).
 
@@ -73,22 +92,29 @@ def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | 
     if not pool:
         return None
 
-    exclude_ids = exclude_ids or set()
-    cache       = storage.read_yt_cache()
-    played      = storage.read_played_ids(uid, station)      # {yt_id: played_at}
-    no_repeat_s = _no_repeat_seconds()
+    exclude_ids  = exclude_ids or set()
+    skip_keys    = skip_keys or set()
+    cache        = storage.read_yt_cache()
+    played       = storage.read_played_ids(uid, station)     # {yt_id: played_at}
+    no_repeat_s  = _no_repeat_seconds()
+    # relaxed: letzte Rettung, wenn KEINE Quelle etwas liefern konnte —
+    # dann sind Sperrfrist und Rotation ausgesetzt, die geschützten Titel
+    # (laufender/nächster) bleiben über exclude_ids trotzdem außen vor.
+    min_repeat_s = 0.0 if relaxed else _min_repeat_seconds()
     # Sperrfrist gilt PRO TITEL über alle Sender hinweg → globaler Index
-    played_g    = storage.read_played_global(uid) if no_repeat_s > 0 else {}
-    max_sec     = max_song_seconds()
-    now         = time.time()
+    played_g     = (storage.read_played_global(uid)
+                    if (no_repeat_s > 0 or min_repeat_s > 0) else {})
+    max_sec      = max_song_seconds()
+    now          = time.time()
+    cycle_at     = listened.ensure_cycle(station) if no_repeat_s <= 0 else 0.0
 
     def _candidates():
         """Newest → oldest; duplicates and over-long songs filtered out."""
         seen: set[tuple[str, str]] = set()
         for entry in reversed(pool):                   # newest → oldest
             key = (entry["artist"].lower(), entry["song"].lower())
-            if key in seen:
-                continue                               # earlier duplicate — skip
+            if key in seen or key in skip_keys:
+                continue          # frühere Dublette oder bereits verworfen
             seen.add(key)
             if exclude_ids:
                 cached = cache.get(storage.yt_cache_key(entry["artist"], entry["song"]))
@@ -102,8 +128,23 @@ def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | 
                     continue                           # Spieldauer zu lang — nie spielen
             yield entry
 
+    def _last_heard(entry: dict, yt_id: str) -> float | None:
+        """
+        Wann lief dieser Titel zuletzt? Drei Quellen, die jüngste gewinnt:
+        der Played-Index (Video-ID), die dauerhafte Liste nach Interpret+
+        Titel und die dauerhafte Liste nach Video-ID. Letztere fängt die
+        Fälle ab, in denen dieselbe Aufnahme unter anderer Schreibweise
+        eingereiht wird.
+        """
+        best = played_g.get(yt_id)
+        for ts in (listened.last_played(entry["artist"], entry["song"]),
+                   listened.last_played_id(yt_id)):
+            if ts and (best is None or ts > best):
+                best = ts
+        return best
+
     def _status(entry: dict) -> str:
-        """'unplayed' | 'played' | 'failed'"""
+        """'unplayed' | 'recent' (Mindestsperre) | 'played' | 'failed'"""
         key    = storage.yt_cache_key(entry["artist"], entry["song"])
         cached = cache.get(key)
         # Playlist-Titel bringen ihre Video-ID mit — damit zählt auch ein
@@ -115,24 +156,26 @@ def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | 
             return "failed"
         if not yt_id:
             return "unplayed"
-        # Dauerhafte Liste (nach Interpret+Titel): überlebt Neustart und
-        # Neuinstallation und greift auch dann, wenn derselbe Titel beim
-        # erneuten Auflösen eine andere YouTube-ID bekommen hat.
-        ts_list = listened.last_played(entry["artist"], entry["song"])
+        last = _last_heard(entry, yt_id)
+
+        # Harte Untergrenze zuerst — gilt in jedem Modus und ist der
+        # eigentliche Schutz gegen Wiederholungen über Quellen, Geräte und
+        # Neuinstallationen hinweg.
+        if min_repeat_s > 0 and last is not None and now - last < min_repeat_s:
+            return "recent"
 
         if no_repeat_s > 0:
             # Fenster-Modus: pro Titel, senderübergreifend
-            ts = played_g.get(yt_id)
-            if ts_list and (ts is None or ts_list > ts):
-                ts = ts_list
-            if ts is None or now - ts >= no_repeat_s:
+            if last is None or now - last >= no_repeat_s:
                 return "unplayed"
             return "played"
 
-        # Modus 0: klassische Vollrotation pro Sender
+        # Modus 0: klassische Vollrotation pro Quelle
         if yt_id in played:
             return "played"
-        if ts_list and ts_list >= listened.cycle_start(station):
+        # Echt GRÖSSER: ein Titel, der exakt im Moment des Rundenstarts
+        # lief, darf die neue Runde nicht blockieren.
+        if last is not None and last > cycle_at:
             return "played"
         return "unplayed"
 
@@ -141,36 +184,50 @@ def _pick_song(uid: str, source, exclude_ids: set[str] | None = None) -> dict | 
         if _status(entry) == "unplayed":
             return entry
 
-    # ── All eligible songs are blocked ─────────────────────────────────────
+    # ── Nichts frei: woran liegt es? ───────────────────────────────────────
+    states = [(_status(e), e) for e in _candidates()]
+    blocked_by_cycle = any(st == "played" for st, _ in states)
+
     if no_repeat_s > 0:
+        if not blocked_by_cycle:
+            # Alles steckt in der Mindestsperre — das ist eine harte Grenze,
+            # hier wird nicht gelockert. Die Quelle liefert diesmal nichts.
+            return None
         # Alle Titel wurden innerhalb der Sperrfrist bereits gespielt.
-        # Laut Anforderung darf dann früher wiederholt werden:
-        # wir nehmen den am längsten zurückliegenden Titel.
+        # Laut Anforderung darf dann früher wiederholt werden: der am
+        # längsten zurückliegende Titel, aber nie einer aus der Sperre.
         best: dict | None = None
         best_ts = float("inf")
-        for entry in _candidates():
-            if _status(entry) == "failed":
+        for st, entry in states:
+            if st in ("failed", "recent"):
                 continue
-            key    = storage.yt_cache_key(entry["artist"], entry["song"])
-            yt_id  = (cache.get(key) or {}).get("yt_id", "")
-            ts     = played_g.get(yt_id, 0.0)
+            key   = storage.yt_cache_key(entry["artist"], entry["song"])
+            yt_id = (cache.get(key) or {}).get("yt_id", "") or entry.get("yt_id", "")
+            ts    = _last_heard(entry, yt_id) or 0.0
             if ts < best_ts:
                 best, best_ts = entry, ts
         if best:
             logger.info(
-                "Station '%s' (uid %s): all songs within %.1fh window — "
-                "repeating oldest", station, uid, no_repeat_s / 3600,
+                "Quelle '%s' (uid %s): alle Titel innerhalb der %.1f-h-Spanne — "
+                "ältester wird wiederholt", station, uid, no_repeat_s / 3600,
             )
         return best
 
-    # ── Mode 0: full cycle complete — reset played set ─────────────────────
-    logger.info("Cycle complete for source '%s' (uid %s)", station, uid)
+    # ── Modus 0: Runde abgeschlossen → Played-Liste zurücksetzen ───────────
+    if not blocked_by_cycle:
+        # Nur die Mindestsperre greift — keine abgeschlossene Runde. Ohne
+        # diese Unterscheidung würde bei jedem Aufruf ein Rundenneustart
+        # ausgelöst und die Rotation damit entwertet.
+        return None
+
+    logger.info("Runde abgeschlossen für Quelle '%s' (uid %s)", station, uid)
     storage.write_played_ids(uid, station, {})
-    # Auch dauerhaft festhalten: alles davor zählt für diesen Sender nicht
+    # Auch dauerhaft festhalten: alles davor zählt für diese Quelle nicht
     # mehr als gespielt — sonst stünde nach einem Neustart sofort wieder
     # die komplette Sperre.
     listened.start_cycle(station)
     played.clear()                       # _status re-evaluates against empty set
+    cycle_at = listened.cycle_start(station)
     for entry in _candidates():
         if _status(entry) == "unplayed":
             return entry
@@ -262,65 +319,94 @@ def unmark_unplayed(uid: str, entries: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 async def _build_next_song_entry(uid: str, source,
-                                 exclude_ids: set[str] | None = None) -> dict | None:
+                                 exclude_ids: set[str] | None = None,
+                                 protect_ids: set[str] | None = None,
+                                 relaxed: bool = False) -> dict | None:
     """
-    Pick and resolve the next song for a station.
+    Pick and resolve the next song for a source.
     Tries up to 5 candidates per call to skip permanently-failed ones.
-    *exclude_ids*: yt_ids, die gerade laufen oder schon eingereiht sind —
-    verhindert, dass derselbe Titel direkt hintereinander kommt, wenn er
-    in mehreren ausgewählten Sendern vorkommt.
+
+    *exclude_ids*: yt_ids, die gerade laufen oder schon eingereiht sind.
+    *protect_ids*: Titel, die auch in der Rückfallebene tabu bleiben
+    (laufender und unmittelbar nächster Titel) — sonst stünde derselbe
+    Titel bei kleinen Quellen direkt zweimal hintereinander.
+    *relaxed*: letzte Rettung, wenn keine Quelle etwas liefern konnte.
     """
     source  = _as_source(source)
     station = source.get("key", "")
     pool    = sources.pool_entries(source)
 
+    exclude_ids = set(exclude_ids or ())
+    protect_ids = set(protect_ids or ())
+    skip_keys: set[tuple[str, str]] = set()
+
     loop = asyncio.get_running_loop()
     for _ in range(min(5, max(1, len(pool)))):
         # _pick_song liest die (potentiell großen) Pool-Dateien synchron —
         # im Executor, damit der Audio-Producer nicht blockiert (Stottern).
-        entry = await loop.run_in_executor(None, _pick_song, uid, source, exclude_ids)
-        if not entry and exclude_ids:
-            # Fallback: lieber wiederholen als Stille (z.B. Mini-Pools)
-            entry = await loop.run_in_executor(None, _pick_song, uid, source, None)
+        entry = await loop.run_in_executor(
+            None, _pick_song, uid, source, exclude_ids, skip_keys, relaxed)
+        if not entry and exclude_ids - protect_ids:
+            # Rückfallebene: lieber wiederholen als Stille — aber nie den
+            # laufenden oder den unmittelbar nächsten Titel.
+            entry = await loop.run_in_executor(
+                None, _pick_song, uid, source, protect_ids, skip_keys, relaxed)
         if not entry:
             return None
 
+        key = (entry["artist"].lower(), entry["song"].lower())
         # Playlist-Titel bringen die Video-ID mit — dann entfällt die Suche.
         result = await resolve_song(entry["artist"], entry["song"],
                                     yt_id=entry.get("yt_id"))
-        if result:
-            # Spieldauer-Limit erst nach dem Resolve prüfbar. Zu lange Titel
-            # werden NICHT als gespielt markiert — die gecachte Dauer sorgt
-            # dafür, dass _pick_song sie ab jetzt gar nicht mehr anbietet.
-            max_sec = max_song_seconds()
-            dur     = result.get("duration")
-            if max_sec and dur and dur > max_sec:
-                logger.info(
-                    "Titel zu lang (%ds > %ds): %s — %s — wird nicht gespielt",
-                    dur, max_sec, entry["artist"], entry["song"],
-                )
-                continue
+        if not result:
+            # resolve_song hat den Titel bereits als fehlgeschlagen vermerkt
+            skip_keys.add(key)
+            continue
 
-            yt_id = result.get("yt_id", "")
-            # Mark as played (Queue-Zeitpunkt; beim tatsächlichen Song-Start
-            # wird der Zeitstempel via mark_song_played aktualisiert).
-            _mark_played(uid, station, yt_id)
+        # Spieldauer-Limit erst nach dem Resolve prüfbar. Zu lange Titel
+        # werden NICHT als gespielt markiert — die gecachte Dauer sorgt
+        # dafür, dass _pick_song sie ab jetzt gar nicht mehr anbietet.
+        max_sec = max_song_seconds()
+        dur     = result.get("duration")
+        if max_sec and dur and dur > max_sec:
+            logger.info(
+                "Titel zu lang (%ds > %ds): %s — %s — wird nicht gespielt",
+                dur, max_sec, entry["artist"], entry["song"],
+            )
+            skip_keys.add(key)
+            continue
 
-            return {
-                "artist":    entry["artist"],
-                "song":      entry["song"],
-                "yt_id":     yt_id,
-                "thumbnail": result.get("thumbnail", ""),
-                "cover_url": result.get("cover_url", ""),
-                "duration":  result.get("duration"),
-                # "station" bleibt der Quellen-Schlüssel — daran hängen die
-                # Played-Dateien und die dauerhafte Hörliste.
-                "station":     station,
-                "source_kind": source.get("kind", sources.KIND_STATION),
-                "source_name": sources.display_name(source),
-                "queued_at": int(time.time()),
-            }
-        # resolve_song already marked this as failed in the cache
+        yt_id = result.get("yt_id", "")
+        # Erst JETZT ist die Video-ID sicher bekannt. Vorher konnte die
+        # Ausschlussliste nicht greifen: ein Senderpool-Eintrag hat keine
+        # ID, und zwei Schreibweisen desselben Titels landen auf derselben
+        # Aufnahme. Genau hier entstanden die Dubletten.
+        if yt_id and (yt_id in exclude_ids or yt_id in protect_ids):
+            logger.info(
+                "[%s] Dublette verhindert: %s — %s läuft bereits oder ist "
+                "eingereiht (Video %s)", uid, entry["artist"], entry["song"], yt_id,
+            )
+            skip_keys.add(key)
+            continue
+
+        # Mark as played (Queue-Zeitpunkt; beim tatsächlichen Song-Start
+        # wird der Zeitstempel via mark_song_played aktualisiert).
+        _mark_played(uid, station, yt_id)
+
+        return {
+            "artist":    entry["artist"],
+            "song":      entry["song"],
+            "yt_id":     yt_id,
+            "thumbnail": result.get("thumbnail", ""),
+            "cover_url": result.get("cover_url", ""),
+            "duration":  result.get("duration"),
+            # "station" bleibt der Quellen-Schlüssel — daran hängen die
+            # Played-Dateien und die dauerhafte Hörliste.
+            "station":     station,
+            "source_kind": source.get("kind", sources.KIND_STATION),
+            "source_name": sources.display_name(source),
+            "queued_at": int(time.time()),
+        }
 
     return None
 
@@ -345,29 +431,62 @@ async def ensure_queue_has_entries(uid: str, count: int = 1) -> None:
         all_failed  = True
 
         # Titel, die gerade laufen oder schon eingereiht sind, nicht erneut
-        # einreihen (derselbe Song kann in mehreren Sender-Pools stehen).
+        # einreihen (derselbe Song kann in mehreren Quellen stehen).
         exclude_ids = {
             e.get("yt_id") for e in queue[max(0, current_index - 1):]
             if e.get("yt_id")
         }
+        # Diese beiden bleiben auch in jeder Rückfallebene tabu: der gerade
+        # laufende Titel und der unmittelbar nächste.
+        protect_ids = {
+            e.get("yt_id")
+            for e in queue[max(0, current_index - 1):current_index + 1]
+            if e.get("yt_id")
+        }
 
         for _ in range(needed):
-            source      = active[station_idx % len(active)]
-            station_idx = (station_idx + 1) % len(active)
-            item        = await _build_next_song_entry(uid, source, exclude_ids)
+            item = None
+            # Normale Runde: jede Quelle einmal versuchen, damit eine
+            # erschöpfte Quelle die Warteschlange nicht blockiert.
+            for _try in range(len(active)):
+                source      = active[station_idx % len(active)]
+                station_idx = (station_idx + 1) % len(active)
+                item        = await _build_next_song_entry(
+                    uid, source, exclude_ids, protect_ids)
+                if item:
+                    break
+                logger.info("[%s] Keine Auswahl aus '%s'", uid,
+                            sources.display_name(source))
+
+            if not item:
+                # Letzte Rettung: keine einzige Quelle konnte etwas liefern
+                # (alles innerhalb der Mindestsperre). Lieber wiederholen
+                # als Stille — der laufende Titel bleibt trotzdem tabu.
+                for _try in range(len(active)):
+                    source      = active[station_idx % len(active)]
+                    station_idx = (station_idx + 1) % len(active)
+                    item        = await _build_next_song_entry(
+                        uid, source, exclude_ids, protect_ids, relaxed=True)
+                    if item:
+                        logger.warning(
+                            "[%s] Alle Quellen innerhalb der Mindestsperre — "
+                            "wiederhole '%s — %s'", uid,
+                            item.get("artist", ""), item.get("song", ""))
+                        break
+
             if item:
                 queue.append(item)
                 if item.get("yt_id"):
                     exclude_ids.add(item["yt_id"])
                 all_failed = False
             else:
-                logger.warning("[%s] No song available from '%s'",
-                               uid, sources.display_name(source))
+                logger.warning("[%s] Kein Titel verfügbar — Warteschlange "
+                               "bleibt kurz", uid)
 
         # Nur die beiden geänderten Felder schreiben: zwischen dem Lesen oben
         # und hier liegen lange Auflösungen (yt-dlp) — ein kompletter
         # Rückschreiber würde zwischenzeitliche Änderungen (Lautstärke,
-        # Senderauswahl) wieder auf den alten Stand setzen.
+        # Quellenauswahl) wieder auf den alten Stand setzen.
         storage.update_user_state(
             uid, queue=queue, current_station_index=station_idx,
         )
@@ -427,7 +546,8 @@ def _same_song(a: dict | None, b: dict | None) -> bool:
     )
 
 
-async def advance_queue(uid: str, played_song: dict | None = None) -> dict | None:
+async def advance_queue(uid: str, played_song: dict | None = None,
+                        resumed: bool = False) -> dict | None:
     """
     Den gespielten Song in die History übernehmen und den Queue-Zeiger
     weiterschieben.
@@ -448,11 +568,16 @@ async def advance_queue(uid: str, played_song: dict | None = None) -> dict | Non
             played_song = cur
 
         if played_song:
-            # Beim Fortsetzen eines pausierten Songs steht er schon ganz oben
+            # Beim FORTSETZEN eines pausierten Songs steht er schon ganz oben
             # in der History (er wurde beim ersten Start eingetragen) — dann
-            # keinen doppelten Eintrag anlegen.
-            history = storage.read_user_history(uid)
-            if not (history and _same_song(history[0], played_song)):
+            # keinen doppelten Eintrag anlegen. Nur dann: eine echte
+            # Wiederholung desselben Titels muss sichtbar bleiben, sonst
+            # verschweigt die History genau die Fälle, die man sucht.
+            skip = False
+            if resumed:
+                history = storage.read_user_history(uid)
+                skip = bool(history) and _same_song(history[0], played_song)
+            if not skip:
                 storage.add_to_history(uid, played_song)
 
         if cur is not None and _same_song(cur, played_song):
