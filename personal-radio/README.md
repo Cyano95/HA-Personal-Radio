@@ -264,6 +264,37 @@ allerersten Titel nach dem Start (dort überbrückt die Keepalive-Stille).
 
 ---
 
+## Oberfläche
+
+Die Weboberfläche ist im Stil einer Musik-App aufgebaut — übernommen aus dem
+Android-Player desselben Projekts, der dieselbe REST-API spricht:
+
+- **Start:** Begrüßung, „Mein Radio“ (alle aktiven Quellen im Wechsel),
+  Quellen-Kacheln, „Als Nächstes“, Vorschläge und zuletzt Gespieltes.
+- **Suchen:** YouTube nach Titeln und Playlists, dazu die eigenen Sender.
+  Ein eingefügter Playlist-Link wird direkt erkannt.
+- **Bibliothek:** Quellen in Abspielreihenfolge mit Schalter und Aktionsblatt
+  (verschieben, pausieren, neu einlesen, nur diese Quelle spielen), darunter
+  die noch nicht genutzten Sender.
+- **Mini-Player** über der Navigation, **Vollbild-Player** mit Fortschritt,
+  Coverbild und Warteschlange.
+- **Einstellungen:** Farbstil (9 Akzentfarben oder „Cover“ = Farbe des
+  laufenden Titels, dazu Dunkel/Schwarz/Mitternacht), gehörte Titel,
+  Wiedergabe-Player und Lautstärke, Stream-URLs und ein **Protokoll** der
+  letzten Meldungen für die Fehlersuche ohne Supervisor.
+
+Die Addon-Konfiguration selbst gehört dem Supervisor: sie wird angezeigt,
+geändert wird sie in den Addon-Optionen.
+
+| Endpunkt | Zweck |
+|---|---|
+| `GET /api/status` | Einrichtung, Fortschritt der Senderaktualisierung |
+| `GET/POST /api/settings` | Farbstil (änderbar) und Konfiguration (Anzeige) |
+| `GET /api/log` | letzte Protokollzeilen |
+| `POST /api/user/play_source` | nur diese Quelle spielen |
+
+---
+
 ## Stream in externen Geräten (Internetradio, VLC, Sonos …)
 
 Die URLs stehen in der Weboberfläche unter **„Stream-URL für externe Geräte"**

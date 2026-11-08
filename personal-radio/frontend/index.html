@@ -2,166 +2,284 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
   <title>Personal Radio</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Sans:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%225%22%20fill%3D%22%23121212%22%2F%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%231db954%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%227.2%22%2F%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%222.2%22%2F%3E%3Cpath%20d%3D%22M12%209.8a2.2%202.2%200%200%201%202.2%202.2M12%207a5%205%200%200%201%205%205%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E" />
+  <meta name="theme-color" content="#121212" />
   <link rel="stylesheet" href="static/style.css" />
+  <script>
+    // Farbstil sofort setzen (kein Aufblitzen beim Start)
+    try { const t = JSON.parse(localStorage.getItem('pr-theme') || 'null');
+          if (t) for (const k in t) document.documentElement.style.setProperty(k, t[k]); } catch (e) {}
+  </script>
 </head>
 <body>
-<div id="app">
 
-  <header id="topbar">
-    <div id="topbar-left">
-      <svg class="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
-        <path d="M12 9a6 6 0 0 1 6 6"/><path d="M12 6a9 9 0 0 1 9 9"/>
-      </svg>
-      <span id="topbar-title">Personal Radio</span>
-    </div>
-    <div id="topbar-right">
-      <select id="player-select" aria-label="Media player"></select>
-      <div id="status-dot" title="Status"></div>
-    </div>
-  </header>
+<!-- ═══ Seiten ═══════════════════════════════════════════════════════════ -->
+<div id="pages">
 
-  <main id="main">
+  <!-- Start -->
+  <section class="page" id="page-home">
+    <header class="page-head">
+      <h1 id="greeting">Hallo</h1>
+      <button class="icon-btn" data-open="settings" aria-label="Einstellungen">
+        <svg viewBox="0 0 24 24"><use href="#i-gear"/></svg>
+      </button>
+    </header>
 
-    <!-- Player Card -->
-    <div class="ha-card" id="player-card">
-      <div id="player-bg"></div>
-      <div id="player-content">
-        <div id="art-wrap">
-          <img id="art-img" src="" alt="Album Art" />
-          <div id="art-placeholder">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
-              <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
-              <path d="M12 9a6 6 0 0 1 6 6"/><path d="M12 6a9 9 0 0 1 9 9"/>
-            </svg>
-          </div>
-        </div>
-        <div id="track-info">
-          <div id="track-title">Verbinde…</div>
-          <div id="track-artist"></div>
-          <div id="track-meta">
-            <span id="station-chip" class="chip"></span>
-            <span id="pause-chip" class="chip chip-paused"></span>
-            <span id="device-chip" class="chip chip-paused"></span>
-            <span id="player-name-label"></span>
-          </div>
-        </div>
-        <div id="controls">
-          <button class="ctrl-btn" id="btn-prev" aria-label="Zurück" disabled>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
-          </button>
-          <button class="ctrl-btn ctrl-main" id="btn-play" aria-label="Play/Stop">
-            <svg class="icon-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-            <svg class="icon-stop" viewBox="0 0 24 24" fill="currentColor" style="display:none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
-            <div class="btn-spinner" style="display:none"></div>
-          </button>
-          <button class="ctrl-btn" id="btn-skip" aria-label="Überspringen">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM14.5 6v12l8.5-6z"/></svg>
-          </button>
-        </div>
-        <div id="volume-row">
-          <svg class="vol-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
-          <input type="range" id="volume-slider" min="0" max="100" value="70" aria-label="Lautstärke" />
-          <svg class="vol-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-        </div>
-      </div>
+    <div class="setup-card" id="setup-hint" hidden>
+      <strong>Willkommen!</strong>
+      <span>Trag die Zugangsdaten deiner Station-Log-API in den Addon-Optionen ein
+        (Einstellungen → Add-ons → Personal Radio → Konfiguration) — oder füge hier
+        über die Suche eine YouTube-Playlist hinzu.</span>
+      <button class="btn-accent" data-open="settings">Status ansehen</button>
     </div>
 
-    <!-- Warteschlange -->
-    <details class="ha-card" id="queue-card">
-      <summary class="ha-card-header ha-card-header--summary">
-        <span class="ha-card-title">Warteschlange</span>
-        <span id="queue-count" class="ha-badge"></span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-      </summary>
-      <div id="queue-list"></div>
-      <div id="queue-actions">
-        <button class="url-copy" type="button" id="btn-queue-clear">Warteschlange leeren</button>
+    <div class="mix-card" id="mix-card">
+      <div class="mix-art"><svg viewBox="0 0 24 24"><use href="#i-radio"/></svg></div>
+      <div class="mix-text">
+        <div class="mix-title">Mein Radio</div>
+        <div class="mix-sub" id="mix-sub">Alle aktiven Quellen im Wechsel</div>
       </div>
-    </details>
-
-    <!-- Quellen: Sender und Playlists in Abspielreihenfolge -->
-    <div class="ha-card" id="stations-card">
-      <div class="ha-card-header">
-        <span class="ha-card-title">Quellen</span>
-        <span id="stations-count" class="ha-badge"></span>
-      </div>
-      <div id="source-order"></div>
-      <div id="search-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="search-icon">
-          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-        </svg>
-        <input type="search" id="station-search" placeholder="Sender suchen…" autocomplete="off" />
-      </div>
-      <div id="station-grid"></div>
+      <button class="play-fab" id="mix-play" aria-label="Abspielen">
+        <svg class="i-play" viewBox="0 0 24 24"><use href="#i-play"/></svg>
+        <svg class="i-pause" viewBox="0 0 24 24"><use href="#i-pause"/></svg>
+      </button>
     </div>
 
-    <!-- YouTube: Titel und Playlists suchen -->
-    <details class="ha-card" id="yt-card">
-      <summary class="ha-card-header ha-card-header--summary">
-        <span class="ha-card-title">Auf YouTube suchen</span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-      </summary>
-      <div id="yt-search-row">
-        <input type="search" id="yt-query" placeholder="Titel, Interpret oder Playlist…" autocomplete="off" />
-        <button class="url-copy" type="button" id="yt-go">Suchen</button>
+    <div class="tile-grid" id="home-sources"></div>
+
+    <h2 class="section-title" id="h-upnext">Als Nächstes</h2>
+    <div class="h-scroll" id="home-upnext"></div>
+
+    <h2 class="section-title" id="h-sugg">Vorschläge für dich</h2>
+    <p class="section-sub" id="sugg-sub">Playlists passend zu deinen meistgehörten Interpreten</p>
+    <div class="h-scroll" id="home-sugg"></div>
+
+    <h2 class="section-title" id="h-recent">Zuletzt gespielt</h2>
+    <div class="h-scroll" id="home-recent"></div>
+  </section>
+
+  <!-- Suchen -->
+  <section class="page" id="page-search" hidden>
+    <header class="page-head"><h1>Suchen</h1></header>
+    <form id="search-form" class="search-box" autocomplete="off">
+      <svg viewBox="0 0 24 24"><use href="#i-search"/></svg>
+      <input id="search-input" type="search" placeholder="Titel, Interpret, Playlist oder Link" enterkeyhint="search" />
+      <button type="button" class="clear-btn" id="search-clear" hidden aria-label="Leeren">×</button>
+    </form>
+    <div class="chips" id="search-chips">
+      <button class="chip on" data-kind="both">Alles</button>
+      <button class="chip" data-kind="tracks">Titel</button>
+      <button class="chip" data-kind="playlists">Playlists</button>
+      <button class="chip" data-kind="stations">Sender</button>
+    </div>
+    <div id="search-results"></div>
+  </section>
+
+  <!-- Bibliothek -->
+  <section class="page" id="page-library" hidden>
+    <header class="page-head">
+      <h1>Bibliothek</h1>
+      <button class="icon-btn" id="lib-add" aria-label="Playlist hinzufügen">
+        <svg viewBox="0 0 24 24"><use href="#i-plus"/></svg>
+      </button>
+    </header>
+    <div class="chips" id="lib-chips">
+      <button class="chip on" data-f="all">Alle</button>
+      <button class="chip" data-f="station">Sender</button>
+      <button class="chip" data-f="playlist">Playlists</button>
+    </div>
+    <p class="section-sub" id="lib-progress" hidden></p>
+    <p class="section-sub">Reihenfolge = Abspielwechsel. Ausgeschaltete Quellen bleiben in der Liste, liefern aber nichts.</p>
+    <div id="lib-sources" class="list"></div>
+
+    <h2 class="section-title">Sender hinzufügen</h2>
+    <div class="search-box small">
+      <svg viewBox="0 0 24 24"><use href="#i-search"/></svg>
+      <input id="station-filter" type="search" placeholder="Sender filtern" />
+    </div>
+    <div id="lib-stations" class="list"></div>
+  </section>
+
+  <!-- Einstellungen -->
+  <section class="page" id="page-settings" hidden>
+    <header class="page-head">
+      <button class="icon-btn" data-back aria-label="Zurück"><svg viewBox="0 0 24 24"><use href="#i-back"/></svg></button>
+      <h1>Einstellungen</h1>
+    </header>
+
+    <div class="card">
+      <h3>Farbstil</h3>
+      <div class="label">Akzentfarbe</div>
+      <div class="swatches" id="sw-accent"></div>
+      <div class="label">Hintergrund</div>
+      <div class="seg" id="sw-bg">
+        <button data-bg="dark">Dunkel</button>
+        <button data-bg="black">Schwarz</button>
+        <button data-bg="midnight">Mitternacht</button>
       </div>
-      <p class="hint-text">Playlists lassen sich als Quelle übernehmen und
-        wechseln sich dann mit den Sendern ab. Eine Playlist-Adresse kann auch
-        direkt eingefügt werden.</p>
-      <div id="yt-results"></div>
-    </details>
+    </div>
 
-    <!-- History Card -->
-    <details class="ha-card" id="history-card">
-      <summary class="ha-card-header ha-card-header--summary">
-        <span class="ha-card-title">Zuletzt gespielt</span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-      </summary>
-      <div id="history-list"></div>
-    </details>
-
-    <!-- Gehörte Titel -->
-    <details class="ha-card" id="listened-card">
-      <summary class="ha-card-header ha-card-header--summary">
-        <span class="ha-card-title">Gehörte Titel</span>
-        <span id="listened-count" class="ha-badge"></span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-      </summary>
-      <div id="listened-body">
-        <p class="hint-text">Diese Liste verhindert, dass Titel doppelt kommen —
-          auch nach einem Neustart oder einer Neuinstallation. Über WebDAV lässt
-          sie sich zwischen mehreren Installationen abgleichen.</p>
-        <div id="listened-stats"></div>
-        <div id="listened-actions">
-          <button class="url-copy" type="button" id="btn-sync">Jetzt abgleichen</button>
-          <button class="url-copy" type="button" id="btn-export">Exportieren</button>
-          <button class="url-copy" type="button" id="btn-import">Importieren</button>
-          <input type="file" id="import-file" accept="application/json,.json" hidden />
-        </div>
+    <div class="card">
+      <h3>Gehörte Titel <span class="badge" id="listened-count"></span></h3>
+      <p class="hint">Verhindert, dass Titel doppelt kommen — auch nach einer Neuinstallation. Über WebDAV
+        mit dem Home-Assistant-Addon und anderen Geräten abgleichbar (gleiches Dateiformat).</p>
+      <div class="stats" id="listened-stats"></div>
+      <div class="row-btns">
+        <button class="btn-outline" id="btn-sync">Jetzt abgleichen</button>
+        <button class="btn-outline" id="btn-export">Exportieren</button>
+        <button class="btn-outline" id="btn-import">Importieren</button>
+        <input type="file" id="import-file" accept="application/json,.json" hidden />
       </div>
-    </details>
+    </div>
 
-    <!-- Stream-URLs für externe Geräte -->
-    <details class="ha-card" id="urls-card">
-      <summary class="ha-card-header ha-card-header--summary">
-        <span class="ha-card-title">Stream-URL für externe Geräte</span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
-      </summary>
+    <div class="card">
+      <h3>Wiedergabe-Player</h3>
+      <p class="hint">An welches Home-Assistant-Gerät gestreamt wird.</p>
+      <select id="player-select" aria-label="Media Player"></select>
+      <div class="label">Lautstärke</div>
+      <input type="range" id="volume-slider" min="0" max="100" value="70" aria-label="Lautstärke" />
+    </div>
+
+    <div class="card">
+      <h3>Stream-URL für externe Geräte</h3>
+      <p class="hint">Für Internetradios und andere Abspielgeräte im selben Netz.
+        Die Adresse enthält deinen Zugriffs-Token — nicht weitergeben.</p>
       <div id="urls-list"></div>
-      <p id="urls-hint">Die URL enthält deinen Zugriffs-Token — nicht weitergeben.
-        Das Gerät muss im selben Netz wie Home&nbsp;Assistant sein.</p>
-    </details>
+    </div>
 
-  </main>
+    <div class="card" id="config-card">
+      <h3>Konfiguration</h3>
+      <p class="hint">Diese Werte stehen in den <strong>Addon-Optionen</strong>
+        von Home&nbsp;Assistant und werden dort geändert:
+        Einstellungen → Add-ons → Personal Radio → Konfiguration.</p>
+      <div class="stats" id="config-stats"></div>
+      <div class="row-btns">
+        <button class="btn-outline" type="button" id="btn-reset-cursors">Senderverlauf neu laden</button>
+      </div>
+    </div>
+
+    <details class="card" id="log-card">
+      <summary><h3>Protokoll</h3></summary>
+      <pre id="log-view"></pre>
+      <button class="btn-outline" type="button" id="btn-log-refresh">Aktualisieren</button>
+    </details>
+  </section>
 </div>
 
-<div id="toast-container" aria-live="polite"></div>
+<!-- ═══ Mini-Player ══════════════════════════════════════════════════════ -->
+<div id="mini" hidden>
+  <div class="mini-inner" id="mini-open">
+    <img id="mini-art" alt="" />
+    <div class="mini-text">
+      <div class="mini-title" id="mini-title"></div>
+      <div class="mini-sub" id="mini-sub"></div>
+    </div>
+    <button class="icon-btn" id="mini-play" aria-label="Play/Pause">
+      <svg class="i-play" viewBox="0 0 24 24"><use href="#i-play"/></svg>
+      <svg class="i-pause" viewBox="0 0 24 24"><use href="#i-pause"/></svg>
+      <span class="spinner"></span>
+    </button>
+  </div>
+  <div class="mini-progress"><div id="mini-progress"></div></div>
+</div>
+
+<!-- ═══ Navigation ═══════════════════════════════════════════════════════ -->
+<nav id="tabs">
+  <button data-tab="home" class="on"><svg viewBox="0 0 24 24"><use href="#i-home"/></svg><span>Start</span></button>
+  <button data-tab="search"><svg viewBox="0 0 24 24"><use href="#i-search"/></svg><span>Suchen</span></button>
+  <button data-tab="library"><svg viewBox="0 0 24 24"><use href="#i-library"/></svg><span>Bibliothek</span></button>
+</nav>
+
+<!-- ═══ Vollbild-Player ══════════════════════════════════════════════════ -->
+<div id="player" class="overlay" hidden>
+  <div class="player-bg" id="player-bg"></div>
+  <header class="player-head">
+    <button class="icon-btn" data-close="player" aria-label="Schließen"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg></button>
+    <div class="player-from">
+      <span>WIRD GESPIELT AUS</span>
+      <strong id="p-source">—</strong>
+    </div>
+    <button class="icon-btn" id="p-more" aria-label="Mehr"><svg viewBox="0 0 24 24"><use href="#i-more"/></svg></button>
+  </header>
+  <div class="player-art-wrap">
+    <img id="p-art" alt="" />
+    <div class="p-art-ph" id="p-art-ph"><svg viewBox="0 0 24 24"><use href="#i-radio"/></svg></div>
+  </div>
+  <div class="player-meta">
+    <div class="p-title" id="p-title">—</div>
+    <div class="p-artist" id="p-artist"></div>
+  </div>
+  <div class="p-error" id="p-error" hidden></div>
+  <div class="p-progress">
+    <div class="bar"><div id="p-fill"></div></div>
+    <div class="times"><span id="p-pos">0:00</span><span id="p-dur">0:00</span></div>
+  </div>
+  <div class="p-controls">
+    <button class="icon-btn big" id="p-prev" aria-label="Zurück"><svg viewBox="0 0 24 24"><use href="#i-prev"/></svg></button>
+    <button class="p-play" id="p-play" aria-label="Play/Pause">
+      <svg class="i-play" viewBox="0 0 24 24"><use href="#i-play"/></svg>
+      <svg class="i-pause" viewBox="0 0 24 24"><use href="#i-pause"/></svg>
+      <span class="spinner"></span>
+    </button>
+    <button class="icon-btn big" id="p-next" aria-label="Weiter"><svg viewBox="0 0 24 24"><use href="#i-next"/></svg></button>
+  </div>
+  <div class="p-bottom">
+    <span class="p-next-label" id="p-next-label"></span>
+    <button class="icon-btn" data-open-queue aria-label="Warteschlange"><svg viewBox="0 0 24 24"><use href="#i-queue"/></svg></button>
+  </div>
+</div>
+
+<!-- ═══ Warteschlange ════════════════════════════════════════════════════ -->
+<div id="queue" class="overlay" hidden>
+  <header class="page-head sticky">
+    <button class="icon-btn" data-close="queue" aria-label="Schließen"><svg viewBox="0 0 24 24"><use href="#i-down"/></svg></button>
+    <h1>Warteschlange</h1>
+    <button class="text-btn" id="q-clear">Leeren</button>
+  </header>
+  <div class="q-scroll">
+    <div class="label">Läuft gerade</div>
+    <div id="q-current" class="list"></div>
+    <div class="label">Als Nächstes</div>
+    <p class="section-sub">Von Hand eingereihte Titel kommen vor den automatisch nachgefüllten.</p>
+    <div id="q-list" class="list"></div>
+  </div>
+</div>
+
+<!-- ═══ Aktionsblatt ═════════════════════════════════════════════════════ -->
+<div id="sheet-backdrop" hidden></div>
+<div id="sheet" hidden>
+  <div class="sheet-grip"></div>
+  <div class="sheet-head" id="sheet-head"></div>
+  <div class="sheet-actions" id="sheet-actions"></div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<!-- ═══ Icons ════════════════════════════════════════════════════════════ -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-play" viewBox="0 0 24 24"><path fill="currentColor" d="M8 5.14v13.72a1 1 0 0 0 1.52.85l10.6-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path fill="currentColor" d="M6 5h2v14H6zm3.5 7 9.5 7V5z"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path fill="currentColor" d="M16 5h2v14h-2zM5 19l9.5-7L5 5z"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path fill="currentColor" d="M12 3 2 11.5h3V21h5.5v-6h3v6H19v-9.5h3z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13zM20 20l-4.6-4.6"/></symbol>
+    <symbol id="i-library" viewBox="0 0 24 24"><path fill="currentColor" d="M4 3h2.5v18H4zm5 0h2.5v18H9zm5.2.6 2.4-.7 4.8 17.3-2.4.7z"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="m19.4 15 1.6 1.2-2 3.4-1.9-.8a7.6 7.6 0 0 1-2.1 1.2l-.3 2h-4l-.3-2a7.6 7.6 0 0 1-2.1-1.2l-1.9.8-2-3.4L6 15a7.8 7.8 0 0 1 0-2.4l-1.6-1.2 2-3.4 1.9.8a7.6 7.6 0 0 1 2.1-1.2l.3-2h4l.3 2a7.6 7.6 0 0 1 2.1 1.2l1.9-.8 2 3.4-1.6 1.2a7.8 7.8 0 0 1 0 2.4z"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 9l7 7 7-7"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><path fill="currentColor" d="M5 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5h13v2H3zm0 6h13v2H3zm0 6h9v2H3zm15-4v6l5-3z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-radio" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><path d="M12 9a6 6 0 0 1 6 6M12 6a9 9 0 0 1 9 9"/></g></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  </defs>
+</svg>
+
 <script src="static/app.js" type="module"></script>
 </body>
 </html>

@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import time
+import zlib
 
 from . import listened, sources, storage
 from .downloader import get_audio_source, max_song_seconds, prefetch_for_user, resolve_song
@@ -702,6 +703,19 @@ def _invalidate_prefetch(uid: str) -> None:
             stream.invalidate_upcoming()
     except Exception:
         logger.debug("[%s] Prefetch konnte nicht verworfen werden", uid)
+
+
+def queue_fingerprint(uid: str) -> int:
+    """
+    Kennzahl, die sich bei jeder Änderung an den kommenden Titeln ändert.
+    Die Oberfläche lädt die Warteschlange nur dann neu — das spart bei
+    einem Sekundentakt eine Menge überflüssiger Abfragen.
+    """
+    state = storage.read_user_state(uid)
+    queue = state.get("queue", [])
+    idx   = max(0, min(int(state.get("current_index", 0) or 0), len(queue)))
+    raw   = "|".join(f'{e.get("yt_id","")}:{e.get("song","")}' for e in queue[idx:])
+    return zlib.crc32(raw.encode("utf-8", "replace"))
 
 
 def queue_view(uid: str) -> dict:
