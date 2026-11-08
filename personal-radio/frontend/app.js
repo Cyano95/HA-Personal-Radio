@@ -29,7 +29,7 @@ async function api(path, method = 'GET', body = null) {
 // ── Zustand ───────────────────────────────────────────────────────────────────
 const S = {
   now: null, sources: [], stations: [], history: [], queue: null, settings: null,
-  sugg: null, tab: 'home', searchKind: 'both', searchRes: null, searching: false,
+  sugg: null, players: [], tab: 'home', searchKind: 'both', searchRes: null, searching: false,
   libFilter: 'all', stationFilter: '', pending: false, lastErr: '', seq: -1, qver: -1,
 };
 const $ = id => document.getElementById(id);
@@ -347,6 +347,15 @@ function renderPlayer() {
   $('p-fill').style.width = dur ? (100 * pos / dur) + '%' : '0';
   $('p-pos').textContent = fmt(pos); $('p-dur').textContent = fmt(dur);
   setBtn($('p-play'), st);
+
+  // Lautstärke des Zielgeräts — beim Ziehen nicht dazwischenfunken
+  if (!_volDragging && Date.now() - _volTouched > 2500 && typeof n.volume === 'number') {
+    $('p-volume').value = Math.round(n.volume * 100);
+  }
+  const dev = $('p-device');
+  $('p-device-name').textContent = n.player_name || n.player_entity_id || 'Gerät wählen';
+  dev.classList.toggle('live', !!st.active && !n.external_only);
+
   $('p-prev').disabled = !st.active || !n.can_prev;
   $('p-next').disabled = !st.active;
   $('p-next-label').textContent = n.next ? 'Als Nächstes: ' + n.next : '';
@@ -392,6 +401,44 @@ $('mini-open').addEventListener('click', () => go('player'));
 $('mix-play').addEventListener('click', togglePlay);
 $('p-play').addEventListener('click', togglePlay);
 $('p-next').addEventListener('click', () => step('api/user/skip'));
+
+// ── Lautstärke und Wiedergabegerät ───────────────────────────────────────────
+let _volDragging = false, _volTouched = 0, _volTimer = null;
+function sendVolume(v) {
+  _volTouched = Date.now();
+  if (S.now) S.now.volume = v / 100;
+  clearTimeout(_volTimer);
+  _volTimer = setTimeout(() => api('api/user/state', 'POST', { volume: v / 100 }), 350);
+}
+$('p-volume').addEventListener('input', e => sendVolume(+e.target.value));
+$('p-volume').addEventListener('pointerdown', () => { _volDragging = true; });
+$('p-volume').addEventListener('pointerup', () => { _volDragging = false; _volTouched = Date.now(); });
+$('p-volume').addEventListener('pointercancel', () => { _volDragging = false; });
+
+async function loadPlayerList() {
+  const p = await api('api/user/players');
+  if (p) S.players = p;
+  return S.players;
+}
+async function switchPlayer(entityId) {
+  const r = await api('api/user/state', 'POST', { player_entity_id: entityId });
+  if (!r) { toast('Gerät konnte nicht gesetzt werden.', true); return; }
+  const name = S.players.find(p => p.entity_id === entityId)?.name || entityId;
+  toast(S.now?.active ? `Wiedergabe läuft weiter auf ${name}.` : `Gerät: ${name}`);
+  pollNow();
+  loadPlayers?.();
+}
+$('p-device').addEventListener('click', async () => {
+  const list = await loadPlayerList();
+  const cur  = S.now?.player_entity_id || '';
+  if (!list.length) { toast('Keine Media-Player in Home Assistant gefunden.', true); return; }
+  sheet('<div><div class="t">Wiedergabegerät</div><div class="s">Wohin gestreamt wird</div></div>',
+    list.map(p => ({
+      icon: p.entity_id === cur ? 'i-check' : 'i-speaker',
+      label: p.name + (p.entity_id === cur ? ' · aktiv' : ''),
+      run: () => { if (p.entity_id !== cur) switchPlayer(p.entity_id); },
+    })));
+});
 $('p-prev').addEventListener('click', () => step('api/user/prev'));
 $('p-more').addEventListener('click', () => {
   const n = S.now || {};
@@ -726,10 +773,9 @@ $('btn-reset-cursors').addEventListener('click', async () => {
 });
 
 // ── Player und Lautstärke (gibt es nur im Addon) ──────────────────────────────
-let _volTouched = 0;
 async function loadPlayers() {
   const [players, state] = await Promise.all([
-    api('api/user/players'), api('api/user/state'),
+    loadPlayerList(), api('api/user/state'),
   ]);
   if (!players) return;
   const cur = state?.player_entity_id || '';
@@ -740,17 +786,8 @@ async function loadPlayers() {
     $('volume-slider').value = Math.round(vol * 100);
   }
 }
-$('player-select').addEventListener('change', async e => {
-  const r = await api('api/user/state', 'POST', { player_entity_id: e.target.value });
-  toast(r ? 'Player gespeichert.' : 'Player konnte nicht gespeichert werden.', !r);
-});
-let _volTimer = null;
-$('volume-slider').addEventListener('input', e => {
-  _volTouched = Date.now();
-  const v = +e.target.value;
-  clearTimeout(_volTimer);
-  _volTimer = setTimeout(() => api('api/user/state', 'POST', { volume: v / 100 }), 400);
-});
+$('player-select').addEventListener('change', e => switchPlayer(e.target.value));
+$('volume-slider').addEventListener('input', e => sendVolume(+e.target.value));
 
 // ── Stream-URLs für externe Geräte ────────────────────────────────────────────
 const URL_ROWS = [

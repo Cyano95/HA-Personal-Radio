@@ -40,6 +40,7 @@ from .player import (
     get_player_state,
     play_stream,
     set_volume as ha_set_volume,
+    stop_entity,
     stop_playback as ha_stop_playback,
 )
 from .queue_manager import (
@@ -715,6 +716,7 @@ async def api_update_user_state(request: Request, body: StateUpdate):
     uid = require_user(request)
     new_volume = None
     stations_changed = False
+    player_switched: tuple[str | None, str] | None = None
     async with get_user_lock(uid):
         state = storage.read_user_state(uid)
         if (body.selected_stations is not None
@@ -725,6 +727,9 @@ async def api_update_user_state(request: Request, body: StateUpdate):
                 sources.apply_station_list(state, body.selected_stations)))
             stations_changed = True
         if body.player_entity_id is not None:
+            old_player = state.get("player_entity_id")
+            if body.player_entity_id != old_player:
+                player_switched = (old_player, body.player_entity_id)
             state["player_entity_id"] = body.player_entity_id
         if body.volume is not None:
             new_volume = max(0.0, min(1.0, body.volume))
@@ -733,11 +738,34 @@ async def api_update_user_state(request: Request, body: StateUpdate):
     # Call HA volume service outside the lock
     if new_volume is not None:
         await ha_set_volume(uid, new_volume)
+    # Zielgerät gewechselt, während etwas läuft: den Stream dorthin
+    # umziehen statt ihn beim alten Gerät zu lassen. Der Stream selbst
+    # läuft weiter, es verbindet sich nur ein anderer Hörer.
+    if player_switched and state.get("is_playing"):
+        old_player, new_player = player_switched
+        asyncio.create_task(_switch_player(uid, old_player, new_player))
+
     # Geänderte Senderauswahl greift auch im laufenden Betrieb ab dem
     # nächsten Song — der aktuelle Song wird nicht unterbrochen.
     if stations_changed:
         asyncio.create_task(apply_source_change(uid))
     return state
+
+
+async def _switch_player(uid: str, old_player: str | None, new_player: str) -> None:
+    """Laufende Wiedergabe auf ein anderes Gerät umziehen."""
+    logger.info("[%s] Wiedergabe wechselt von %s zu %s", uid,
+                old_player or "—", new_player)
+    ok = await play_stream(uid)
+    if not ok:
+        logger.warning("[%s] Neues Gerät %s nahm den Stream nicht an",
+                       uid, new_player)
+        return
+    if old_player and old_player != new_player:
+        # Erst stoppen, wenn das neue Gerät läuft — sonst entsteht eine
+        # Lücke, und bei nur einem Hörer würde der Producer anhalten.
+        await asyncio.sleep(2.0)
+        await stop_entity(old_player)
 
 
 @app.post("/api/user/play")
@@ -1010,12 +1038,12 @@ async def api_search(request: Request, q: str = Query(...),
     # zu suchen — das ist fast immer das, was gemeint ist.
     direct = ytsearch.playlist_id_from(query) if ("list=" in query or "youtu" in query) else ""
     if direct:
-        known = storage.read_playlist(direct) or {}
+        meta = await ytsearch.playlist_meta(direct)
         return {"tracks": [], "playlists": [{
-            "id": direct, "name": known.get("name") or "Playlist",
+            "id": direct, "name": meta.get("name") or "Playlist",
             "url": f"https://www.youtube.com/playlist?list={direct}",
-            "count": len(known.get("tracks", [])), "uploader": "",
-            "thumbnail": known.get("thumbnail", ""), "direct": True,
+            "count": meta.get("count", 0), "uploader": "",
+            "thumbnail": meta.get("thumbnail", ""), "direct": True,
         }]}
 
     tracks, playlists = await asyncio.gather(
