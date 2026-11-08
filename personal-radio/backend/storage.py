@@ -264,6 +264,23 @@ def write_played_global(uid: str, played: dict[str, float]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Oberflächen-Einstellungen (Farbstil) — alles andere kommt aus den
+# Addon-Optionen und gehört dem Supervisor.
+# ---------------------------------------------------------------------------
+
+UI_PATH = DATA_ROOT / "ui.json"
+
+
+def read_ui() -> dict:
+    data = read_json(UI_PATH, default={})
+    return data if isinstance(data, dict) else {}
+
+
+def write_ui(data: dict) -> None:
+    write_json(UI_PATH, data)
+
+
+# ---------------------------------------------------------------------------
 # YT-ID cache
 # ---------------------------------------------------------------------------
 

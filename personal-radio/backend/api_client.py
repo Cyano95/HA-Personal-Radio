@@ -70,6 +70,14 @@ class StationAPIClient:
         self.user = os.environ.get("STATION_API_USER", "").strip()
         self._backoff = 1
         self._client: httpx.AsyncClient | None = None
+        # Zustand für die Oberfläche (Fortschrittsanzeige in der Bibliothek)
+        self.polling        = False
+        self.progress_done  = 0
+        self.progress_total = 0
+        self.last_error: str | None = None
+        # Zählt hoch, sobald ein Sender neue Titel bekommen hat — die
+        # Oberfläche lädt daraufhin die Senderliste neu.
+        self.pool_version   = 0
 
     @property
     def configured(self) -> bool:
@@ -108,7 +116,8 @@ class StationAPIClient:
                     return None
 
                 resp.raise_for_status()
-                self._backoff = 1
+                self._backoff   = 1
+                self.last_error = None
                 return resp.json()
 
             except httpx.HTTPStatusError as e:
@@ -117,6 +126,7 @@ class StationAPIClient:
                     e.response.status_code, params.get("station", "?"),
                     e.response.text[:200],
                 )
+                self.last_error = f"HTTP {e.response.status_code} von der Station-API"
                 await asyncio.sleep(self._backoff)
                 self._backoff = min(self._backoff * 2, MAX_BACKOFF)
                 return None
@@ -124,6 +134,7 @@ class StationAPIClient:
                 logger.warning(
                     "Station API request failed: %s (backoff %ds)", e, self._backoff
                 )
+                self.last_error = f"Station-API nicht erreichbar: {e}"
                 await asyncio.sleep(self._backoff)
                 self._backoff = min(self._backoff * 2, MAX_BACKOFF)
                 return None
@@ -195,6 +206,8 @@ class StationAPIClient:
                 await loop.run_in_executor(
                     None, storage.append_to_station_pool, name, entries
                 )
+                # Neue Titel im Vorrat → die Oberfläche lädt nach
+                self.pool_version += 1
                 total_added += len(entries)
 
             # Advance cursor by the number of raw lines in this batch
@@ -241,6 +254,11 @@ class StationAPIClient:
 
         cursors = storage.read_cursors()
 
+        todo = [n for n, c in remote_counts.items() if cursors.get(n, 0) < c]
+        self.polling        = True
+        self.progress_total = len(todo)
+        self.progress_done  = 0
+
         for name, remote_count in remote_counts.items():
             since = cursors.get(name, 0)
             if since >= remote_count:
@@ -254,8 +272,10 @@ class StationAPIClient:
                 name, since, remote_count, remote_count - since,
             )
             await self._drain_station(name, cursors)
+            self.progress_done += 1
 
         storage.write_cursors(cursors)
+        self.polling = False
 
     async def poll_stations(self, names: list[str]) -> None:
         """

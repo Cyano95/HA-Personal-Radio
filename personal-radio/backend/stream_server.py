@@ -266,6 +266,27 @@ class UserStream:
     # ── Listener management ───────────────────────────────────────────────
 
     @property
+    def position(self) -> float:
+        """
+        Ungefähre Abspielposition im laufenden Titel.
+
+        Gezählt wird, was dem Encoder übergeben wurde — der Hörer ist um den
+        Echtzeit-Vorlauf und seinen eigenen Puffer dahinter. Für eine
+        Fortschrittsanzeige reicht das, der Vorlauf wird abgezogen.
+        """
+        if self._song_pcm is None:
+            return 0.0
+        played = self._song_offset_s + self._song_pos / BYTES_PER_SEC
+        return max(0.0, played - REALTIME_AHEAD)
+
+    @property
+    def duration(self) -> float:
+        """Gesamtlänge des laufenden Titels (nach Randbeschnitt)."""
+        if self._song_pcm is None:
+            return 0.0
+        return self._song_offset_s + len(self._song_pcm) / BYTES_PER_SEC
+
+    @property
     def listeners(self) -> int:
         """Anzahl verbundener Hörer — auch solche, die wir nicht gestartet haben."""
         return len(self._subs)

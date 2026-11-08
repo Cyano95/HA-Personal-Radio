@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from . import listened, sources, storage, webdav_sync, ytsearch
+from . import listened, logbuf, sources, storage, webdav_sync, ytsearch
 from .api_client import StationAPIClient
 from .downloader import prefetch_for_user
 from .mp3_server import serve_mp3, health as mp3_health
@@ -48,12 +48,14 @@ from .queue_manager import (
     apply_station_change,
     ensure_queue_has_entries,
     get_current_song,
+    get_next_song,
     get_user_error,
     get_user_lock,
     go_to_previous,
     mark_song_played,
     next_is_ready,
     queue_add,
+    queue_fingerprint,
     queue_clear,
     queue_move,
     queue_remove,
@@ -76,6 +78,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+logbuf.install()
 logger = logging.getLogger("personal_radio.main")
 
 app = FastAPI(title="Personal Radio", docs_url=None, redoc_url=None)
@@ -825,12 +828,33 @@ async def api_nowplaying(request: Request):
             player_active = bool(token) and token in content and \
                 pstate.get("state") in ("playing", "buffering")
 
+    live = stream is not None and not stream.stopped
+    nxt  = get_next_song(uid)
+    try:
+        history_len = len(storage.read_user_history(uid))
+    except Exception:
+        history_len = 0
+
     return {
         "artist":           song.get("artist")    if song else None,
         "song":             song.get("song")      if song else None,
         "thumbnail":        song.get("thumbnail") if song else None,
         "cover_url":        song.get("cover_url") if song else None,
         "station":          song.get("station")   if song else None,
+        # Anzeige-Herkunft (Sendername oder Playlist-Titel)
+        "source_name":      (song.get("source_name") or song.get("station")) if song else None,
+        "source_kind":      song.get("source_kind") if song else None,
+        # Läuft überhaupt etwas (auch durch ein fremdes Gerät)?
+        "active":           is_playing,
+        # Wiedergabe gewollt, aber noch kein Titel bereit (Auflösen/Dekodieren)
+        "loading":          bool(is_playing and (not live or stream.current_song is None)),
+        "position":         round(stream.position, 1) if live else 0.0,
+        "duration":         round(stream.duration, 1) if live else (song or {}).get("duration") or 0,
+        "next":             f'{nxt.get("artist","")} — {nxt.get("song","")}'.strip(" —") if nxt else "",
+        "can_prev":         history_len >= 2,
+        # Kennzahlen: ändern sie sich, lädt die Oberfläche gezielt nach
+        "queue_version":    queue_fingerprint(uid),
+        "pool_version":     api_client.pool_version,
         "player_entity_id": entity_id,
         "player_name":      player_name,
         "is_playing":       is_playing,
@@ -856,25 +880,36 @@ async def api_nowplaying(request: Request):
 # Quellen (Sender + Playlists)
 # ---------------------------------------------------------------------------
 
+def _station_label(name: str) -> str:
+    return str(name or "").replace("_", " ").title()
+
+
 def _source_info(src: dict) -> dict:
-    return {**src, "count": sources.pool_size(src)}
+    """Quelle plus das, was die Oberfläche zum Anzeigen braucht."""
+    info = {**src, "count": sources.pool_size(src)}
+    if src.get("kind") == sources.KIND_PLAYLIST:
+        meta = storage.read_playlist(sources.playlist_id(src)) or {}
+        info["display"]   = src.get("name") or meta.get("name") or src["key"]
+        info["thumbnail"] = meta.get("thumbnail", "")
+    else:
+        info["display"]   = _station_label(src.get("name", ""))
+        info["thumbnail"] = ""
+    return info
 
 
 @app.get("/api/user/sources")
 async def api_sources(request: Request):
-    """Quellen in Abspielreihenfolge."""
+    """Quellen in Abspielreihenfolge (Liste, wie die Oberfläche sie erwartet)."""
     uid = require_user(request)
     state = storage.read_user_state(uid)
-    return {
-        "sources": [_source_info(s) for s in sources.from_state(state)],
-        "current": int(state.get("current_station_index", 0) or 0),
-    }
+    return [_source_info(s) for s in sources.from_state(state)]
 
 
 class SourceList(BaseModel):
     sources: list[dict]
 
 
+@app.post("/api/user/sources")
 @app.put("/api/user/sources")
 async def api_sources_set(request: Request, body: SourceList):
     """
@@ -895,7 +930,7 @@ async def api_sources_set(request: Request, body: SourceList):
     if changed:
         asyncio.create_task(apply_source_change(uid))
     state = storage.read_user_state(uid)
-    return {"sources": [_source_info(s) for s in sources.from_state(state)]}
+    return [_source_info(s) for s in sources.from_state(state)]
 
 
 class SourceRef(BaseModel):
@@ -911,7 +946,48 @@ async def api_sources_remove(request: Request, body: SourceRef):
         storage.update_user_state(uid, **sources.to_state_fields(keep),
                                   current_station_index=0)
     asyncio.create_task(apply_source_change(uid))
-    return {"sources": [_source_info(s)
+    return [_source_info(s)
+            for s in sources.from_state(storage.read_user_state(uid))]
+
+
+@app.post("/api/user/play_source")
+async def api_play_source(request: Request, body: SourceRef):
+    """
+    Nur diese Quelle spielen: sie wird eingeschaltet, alle anderen pausiert
+    (sie bleiben in der Liste), die Warteschlange neu gefüllt und die
+    Wiedergabe gestartet. Läuft schon etwas, wird zum neuen Titel gewechselt.
+    """
+    uid = require_user(request)
+    key = (body.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Keine Quelle angegeben")
+
+    async with get_user_lock(uid):
+        state = storage.read_user_state(uid)
+        srcs  = sources.from_state(state)
+        found = False
+        for src in srcs:
+            src["enabled"] = (src["key"] == key)
+            found |= src["key"] == key
+        if not found:
+            if key.startswith(sources.PLAYLIST_PREFIX):
+                pl_id = key[len(sources.PLAYLIST_PREFIX):]
+                meta  = storage.read_playlist(pl_id) or {}
+                srcs.append(sources.playlist_source(pl_id, meta.get("name", ""),
+                                                    meta.get("url", "")))
+            else:
+                srcs.append(sources.station_source(key))
+        storage.update_user_state(uid, **sources.to_state_fields(srcs),
+                                  current_station_index=0)
+
+    await apply_source_change(uid)
+    was_playing = bool(storage.read_user_state(uid).get("is_playing"))
+    ok = await engine.start_playback(uid)
+    if was_playing:
+        # Läuft bereits: sofort auf einen Titel der neuen Quelle wechseln
+        await engine.skip_song(uid)
+    return {"ok": bool(ok) or was_playing,
+            "sources": [_source_info(s)
                         for s in sources.from_state(storage.read_user_state(uid))]}
 
 
@@ -929,26 +1005,59 @@ async def api_search(request: Request, q: str = Query(...),
         return {"tracks": [], "playlists": []}
     want_t = kind in ("both", "tracks")
     want_p = kind in ("both", "playlists")
+
+    # Eingefügter Playlist-Link: direkt als Treffer anbieten, statt danach
+    # zu suchen — das ist fast immer das, was gemeint ist.
+    direct = ytsearch.playlist_id_from(query) if ("list=" in query or "youtu" in query) else ""
+    if direct:
+        known = storage.read_playlist(direct) or {}
+        return {"tracks": [], "playlists": [{
+            "id": direct, "name": known.get("name") or "Playlist",
+            "url": f"https://www.youtube.com/playlist?list={direct}",
+            "count": len(known.get("tracks", [])), "uploader": "",
+            "thumbnail": known.get("thumbnail", ""), "direct": True,
+        }]}
+
     tracks, playlists = await asyncio.gather(
         ytsearch.search_tracks(query, 15) if want_t else _empty_list(),
         ytsearch.search_playlists(query, 8) if want_p else _empty_list(),
     )
-    return {"tracks": tracks, "playlists": playlists}
+    return {"tracks": tracks, "playlists": playlists,
+            "failed": want_t and not tracks and want_p and not playlists}
 
 
 async def _empty_list() -> list:
     return []
 
 
+class ForceFlag(BaseModel):
+    force: bool = False
+
+
+_SUGG_TTL = 6 * 3600
+_sugg_cache: dict = {"at": 0.0, "items": []}
+
+
 @app.get("/api/suggestions")
-async def api_suggestions(request: Request):
+@app.post("/api/suggestions")
+async def api_suggestions(request: Request, body: ForceFlag | None = None):
     """
     Vorschläge aus den meistgehörten Interpreten. Echte YouTube-Empfehlungen
     wären nur mit einem API-Schlüssel möglich — das ist hier bewusst nicht
     der Fall; die Herkunft steht in 'because'.
+
+    Jede Anfrage stößt mehrere YouTube-Suchen an, deshalb sechs Stunden
+    zwischengespeichert.
     """
     require_user(request)
-    return {"playlists": await ytsearch.suggestions(8)}
+    force = bool(body.force) if body else False
+    now   = time.time()
+    if not force and _sugg_cache["items"] and now - _sugg_cache["at"] < _SUGG_TTL:
+        return _sugg_cache["items"]
+    items = await ytsearch.suggestions(8)
+    if items or force:
+        _sugg_cache.update(at=now, items=items)
+    return items
 
 
 class PlaylistRef(BaseModel):
@@ -1047,6 +1156,102 @@ async def api_queue_clear(request: Request):
     uid = require_user(request)
     n = await queue_clear(uid)
     return {"removed": n, **queue_view(uid)}
+
+
+# ---------------------------------------------------------------------------
+# Status, Einstellungen, Protokoll
+# ---------------------------------------------------------------------------
+
+@app.get("/api/status")
+async def api_status(request: Request):
+    """Zustand für die Oberfläche: Einrichtung und Senderaktualisierung."""
+    uid = require_user(request)
+    state = storage.read_user_state(uid)
+    return {
+        "configured":     api_client.configured,
+        "polling":        api_client.polling,
+        "progress_done":  api_client.progress_done,
+        "progress_total": api_client.progress_total,
+        "api_error":      api_client.last_error,
+        "pool_version":   api_client.pool_version,
+        "sources":        len(sources.from_state(state)),
+    }
+
+
+# Was in den Addon-Optionen steht, gehört dem Supervisor — die Oberfläche
+# zeigt es nur an. Änderbar ist hier allein der Farbstil.
+_UI_KEYS = ("theme_accent", "theme_background")
+
+
+@app.get("/api/settings")
+async def api_settings(request: Request):
+    require_user(request)
+    ui = storage.read_ui()
+
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _b(name: str, default: bool = True) -> bool:
+        raw = os.environ.get(name, "")
+        if str(raw).strip() == "":
+            return default
+        return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+    return {
+        # änderbar
+        "theme_accent":     ui.get("theme_accent", "green"),
+        "theme_background": ui.get("theme_background", "dark"),
+        # nur Anzeige — kommt aus den Addon-Optionen
+        "read_only": {
+            "station_api_url":    os.environ.get("STATION_API_URL", ""),
+            "station_api_user":   os.environ.get("STATION_API_USER", ""),
+            "station_api_token":  "••••••" if os.environ.get("STATION_API_TOKEN") else "",
+            "max_song_minutes":   _f("MAX_SONG_MINUTES", 0),
+            "no_repeat_hours":    _f("NO_REPEAT_HOURS", 0),
+            "min_repeat_hours":   _f("MIN_REPEAT_HOURS", 4),
+            "normalize_loudness": _b("NORMALIZE_LOUDNESS"),
+            "target_loudness":    _f("TARGET_LOUDNESS", -14),
+            "trim_silence":       _b("TRIM_SILENCE"),
+            "icy_metadata":       _b("ICY_METADATA"),
+            "fanart_api_key":     "••••••" if os.environ.get("FANART_API_KEY") else "",
+            "webdav_url":         os.environ.get("WEBDAV_URL", ""),
+            "webdav_user":        os.environ.get("WEBDAV_USER", ""),
+            "webdav_interval_minutes": _f("WEBDAV_INTERVAL_MINUTES", 30),
+            "media_content_type": os.environ.get("MEDIA_CONTENT_TYPE", "music"),
+        },
+        "configured": api_client.configured,
+    }
+
+
+@app.post("/api/settings")
+async def api_settings_set(request: Request):
+    """Nur der Farbstil ist von hier aus änderbar."""
+    require_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Kein gültiges JSON")
+    ui = storage.read_ui()
+    for k in _UI_KEYS:
+        if isinstance(body, dict) and k in body:
+            ui[k] = str(body[k])[:40]
+    storage.write_ui(ui)
+    return {"ok": True, **{k: ui.get(k) for k in _UI_KEYS}}
+
+
+@app.get("/api/log")
+async def api_log(request: Request, limit: int = Query(300)):
+    """Die letzten Protokollzeilen — für die Fehlersuche ohne Supervisor."""
+    require_user(request)
+    return {"log": logbuf.text(max(10, min(1000, limit)))}
+
+
+@app.post("/api/reset_cursors")
+async def api_reset_cursors_alias(request: Request):
+    return await api_reset_cursors(request)
 
 
 @app.get("/api/user/listened")
