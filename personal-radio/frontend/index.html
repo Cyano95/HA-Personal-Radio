@@ -225,7 +225,16 @@
     </button>
     <button class="icon-btn big" id="p-next" aria-label="Weiter"><svg viewBox="0 0 24 24"><use href="#i-next"/></svg></button>
   </div>
+  <div class="p-volume">
+    <svg class="vol-icon" viewBox="0 0 24 24"><use href="#i-vol-min"/></svg>
+    <input type="range" id="p-volume" min="0" max="100" value="70" aria-label="Lautstärke" />
+    <svg class="vol-icon" viewBox="0 0 24 24"><use href="#i-vol-max"/></svg>
+  </div>
   <div class="p-bottom">
+    <button class="device-btn" id="p-device" aria-label="Wiedergabegerät wählen">
+      <svg viewBox="0 0 24 24"><use href="#i-speaker"/></svg>
+      <span id="p-device-name">Gerät wählen</span>
+    </button>
     <span class="p-next-label" id="p-next-label"></span>
     <button class="icon-btn" data-open-queue aria-label="Warteschlange"><svg viewBox="0 0 24 24"><use href="#i-queue"/></svg></button>
   </div>
@@ -276,6 +285,9 @@
     <symbol id="i-radio" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><path d="M12 9a6 6 0 0 1 6 6M12 6a9 9 0 0 1 9 9"/></g></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="5" y="2.5" width="14" height="19" rx="2.5"/><circle cx="12" cy="15" r="3.4"/><circle cx="12" cy="6.5" r="1.1"/></g></symbol>
+    <symbol id="i-vol-min" viewBox="0 0 24 24"><path fill="currentColor" d="M4 9v6h3.5L12 19V5L7.5 9H4z"/></symbol>
+    <symbol id="i-vol-max" viewBox="0 0 24 24"><path fill="currentColor" d="M4 9v6h3.5L12 19V5L7.5 9H4zm11.5 3a4 4 0 0 0-2.5-3.7v7.4a4 4 0 0 0 2.5-3.7zM13 3.2v2.1a6.8 6.8 0 0 1 0 13.4v2.1a8.9 8.9 0 0 0 0-17.6z"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
   </defs>
 </svg>

@@ -156,6 +156,28 @@ def _search_playlists_sync(query: str, limit: int) -> list[dict]:
     return out
 
 
+def _playlist_head_sync(pl_id: str) -> dict:
+    """
+    Nur den Kopf einer Playlist lesen: Name, Bild und Titelanzahl.
+
+    Die Suchantwort von YouTube enthält die Anzahl nicht — sie steht erst
+    auf der Playlist-Seite. Mit ``playlistend=1`` kostet das eine einzige
+    Anfrage, statt die komplette Liste aufzuzählen.
+    """
+    info = _extract(f"https://www.youtube.com/playlist?list={pl_id}", 1)
+    if not info:
+        return {}
+    count = info.get("playlist_count")
+    if not count:
+        entries = info.get("entries")
+        count = len(entries) if isinstance(entries, list) else 0
+    return {
+        "count":     int(count or 0),
+        "name":      info.get("title") or "",
+        "thumbnail": (info.get("thumbnails") or [{}])[-1].get("url", ""),
+    }
+
+
 def _fetch_playlist_sync(pl_id: str, limit: int) -> dict | None:
     info = _extract(f"https://www.youtube.com/playlist?list={pl_id}", limit)
     if not info:
@@ -181,6 +203,7 @@ def _fetch_playlist_sync(pl_id: str, limit: int) -> dict | None:
     return {
         "id":         pl_id,
         "name":       info.get("title") or pl_id,
+        "thumbnail":  (info.get("thumbnails") or [{}])[-1].get("url", ""),
         "url":        f"https://www.youtube.com/playlist?list={pl_id}",
         "uploader":   info.get("uploader") or info.get("channel") or "",
         "fetched_at": int(time.time()),
@@ -206,15 +229,68 @@ async def search_tracks(query: str, limit: int = 15) -> list[dict]:
         return []
 
 
+_meta_cache: dict[str, dict] = {}
+META_TIMEOUT = 12.0
+
+
+async def playlist_meta(pl_id: str) -> dict:
+    """Name, Bild und Titelanzahl einer Playlist (gecacht)."""
+    if not pl_id:
+        return {}
+    if pl_id in _meta_cache:
+        return _meta_cache[pl_id]
+    # Schon gespeicherte Playlists kennen ihre Anzahl bereits
+    local = storage.read_playlist(pl_id)
+    if local and local.get("tracks"):
+        meta = {"count": len(local["tracks"]), "name": local.get("name", ""),
+                "thumbnail": local.get("thumbnail", "")}
+        _meta_cache[pl_id] = meta
+        return meta
+    try:
+        meta = await _run(_playlist_head_sync, pl_id, timeout=META_TIMEOUT)
+    except asyncio.TimeoutError:
+        return {}
+    if meta:
+        _meta_cache[pl_id] = meta
+    return meta or {}
+
+
+async def add_playlist_counts(items: list[dict], timeout: float = 15.0) -> list[dict]:
+    """
+    Titelanzahl für Suchtreffer nachtragen — alle Playlists gleichzeitig.
+    Was nicht rechtzeitig antwortet, bleibt ohne Anzahl; die Treffer selbst
+    sollen dadurch nicht warten müssen.
+    """
+    todo = [p for p in items if not p.get("count")]
+    if not todo:
+        return items
+    try:
+        metas = await asyncio.wait_for(
+            asyncio.gather(*(playlist_meta(p["id"]) for p in todo),
+                           return_exceptions=True),
+            timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.info("Titelanzahl der Playlists nicht rechtzeitig ermittelt")
+        return items
+    for p, meta in zip(todo, metas):
+        if isinstance(meta, dict) and meta:
+            p["count"] = meta.get("count", 0)
+            if meta.get("thumbnail") and not p.get("thumbnail"):
+                p["thumbnail"] = meta["thumbnail"]
+    return items
+
+
 async def search_playlists(query: str, limit: int = 10) -> list[dict]:
     if not query.strip():
         return []
     try:
-        return await _run(_search_playlists_sync, query, max(1, min(25, limit)),
-                          timeout=SEARCH_TIMEOUT)
+        items = await _run(_search_playlists_sync, query, max(1, min(25, limit)),
+                           timeout=SEARCH_TIMEOUT)
     except asyncio.TimeoutError:
         logger.warning("Playlistsuche '%s' überschritt %.0fs", query, SEARCH_TIMEOUT)
         return []
+    return await add_playlist_counts(items)
 
 
 async def fetch_playlist(value: str, limit: int = MAX_PLAYLIST) -> dict | None:
@@ -264,5 +340,5 @@ async def suggestions(limit: int = 8) -> list[dict]:
             pl["because"] = artist
             out.append(pl)
             if len(out) >= limit:
-                return out
-    return out
+                return await add_playlist_counts(out)
+    return await add_playlist_counts(out)

@@ -272,12 +272,14 @@ Android-Player desselben Projekts, der dieselbe REST-API spricht:
 - **Start:** Begrüßung, „Mein Radio“ (alle aktiven Quellen im Wechsel),
   Quellen-Kacheln, „Als Nächstes“, Vorschläge und zuletzt Gespieltes.
 - **Suchen:** YouTube nach Titeln und Playlists, dazu die eigenen Sender.
-  Ein eingefügter Playlist-Link wird direkt erkannt.
+  Ein eingefügter Playlist-Link wird direkt erkannt. Bei Playlists steht die
+  Titelanzahl dabei — YouTube liefert sie in der Suchantwort nicht, sie wird
+  mit je einer zusätzlichen Anfrage aus dem Playlist-Kopf geholt (gecacht).
 - **Bibliothek:** Quellen in Abspielreihenfolge mit Schalter und Aktionsblatt
   (verschieben, pausieren, neu einlesen, nur diese Quelle spielen), darunter
   die noch nicht genutzten Sender.
 - **Mini-Player** über der Navigation, **Vollbild-Player** mit Fortschritt,
-  Coverbild und Warteschlange.
+  Coverbild, Lautstärke des Zielgeräts, Geräteauswahl und Warteschlange.
 - **Einstellungen:** Farbstil (9 Akzentfarben oder „Cover“ = Farbe des
   laufenden Titels, dazu Dunkel/Schwarz/Mitternacht), gehörte Titel,
   Wiedergabe-Player und Lautstärke, Stream-URLs und ein **Protokoll** der

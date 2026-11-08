@@ -162,6 +162,21 @@ async def play_stream(uid: str) -> bool:
         return False
 
 
+async def stop_entity(entity_id: str) -> None:
+    """Einen bestimmten Player stoppen — beim Wechsel des Zielgeräts."""
+    if not entity_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{HA_BASE}/services/media_player/media_stop",
+                headers=_headers(),
+                json={"entity_id": entity_id},
+            )
+    except Exception as e:
+        logger.warning("Stop von %s fehlgeschlagen: %s", entity_id, e)
+
+
 async def stop_playback(uid: str) -> None:
     state     = storage.read_user_state(uid)
     entity_id = state.get("player_entity_id")
