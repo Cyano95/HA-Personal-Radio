@@ -284,8 +284,16 @@ input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); f
 .seg button { flex: 1; padding: 9px 4px; border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); }
 .seg button.on { background: var(--surface-3); color: var(--text); }
 
-#log-card summary { list-style: none; cursor: pointer; }
+#log-card summary { list-style: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 #log-card summary::-webkit-details-marker { display: none; }
+/* Der eigene Aufklapp-Pfeil: ohne ihn wirkte die zugeklappte Karte leer. */
+#log-card summary::after {
+  content: ""; flex-shrink: 0; width: 9px; height: 9px;
+  border-right: 2px solid var(--text-2); border-bottom: 2px solid var(--text-2);
+  transform: translateY(-3px) rotate(45deg); transition: transform .2s ease;
+}
+#log-card[open] summary::after { transform: translateY(2px) rotate(-135deg); }
 #log-view { margin: 10px 0; padding: 10px; max-height: 360px; overflow: auto; background: #0a0a0a; border-radius: 6px;
   font: 11px/1.45 ui-monospace, monospace; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
 #log-card .btn-outline { align-self: flex-start; }
@@ -349,3 +357,41 @@ input[type=range] {
 .toast { background: #fff; color: #121212; border-radius: 8px; padding: 11px 16px; font-size: 14px; font-weight: 500;
   box-shadow: 0 6px 20px rgba(0,0,0,.4); transition: opacity .3s; max-width: 100%; }
 .toast.err { background: #ffd6da; color: #5c0b14; }
+
+
+/* ── Breite Fenster ─────────────────────────────────────────────────────────
+   Das Layout stammt vom Telefon. Ohne Begrenzung läuft es am Rechner über
+   die volle Fensterbreite auseinander: Zeilentext links, Schalter ganz
+   rechts, die Navigation über zwei Handbreit verteilt. Auf breiten Fenstern
+   wird die Anwendung deshalb als mittige Spalte gezeigt — dieselbe
+   Aufteilung wie auf dem Telefon, nur zentriert und abgesetzt.
+
+   Die fest positionierten Teile (Navigation, Mini-Player, Vollbild-Player,
+   Warteschlange, Aktionsblatt, Meldungen) werden einzeln begrenzt; sie
+   hängen nicht am Textfluss. Gerechnet wird mit left/right statt mit
+   translateX, weil die Einblend-Animation den transform schon benutzt. */
+@media (min-width: 680px) {
+  :root { --app-w: 600px; }
+  html { background: #090909; }
+  body { background: transparent; }
+  /* Flächiger Untergrund genau unter der Spalte — sonst stünde der Inhalt
+     ohne Rahmen im dunklen Nichts. */
+  body::before {
+    content: ""; position: fixed; z-index: -1; top: 0; bottom: 0;
+    left: calc(50% - var(--app-w) / 2); width: var(--app-w);
+    background: var(--bg); box-shadow: 0 0 0 1px rgba(255,255,255,.07);
+    pointer-events: none;
+  }
+
+  #pages  { max-width: var(--app-w); margin: 0 auto; }
+  #tabs   { left: calc(50% - var(--app-w) / 2);      right: calc(50% - var(--app-w) / 2); }
+  #mini   { left: calc(50% - var(--app-w) / 2 + 8px);  right: calc(50% - var(--app-w) / 2 + 8px); }
+  #player,
+  #queue  { left: calc(50% - var(--app-w) / 2);      right: calc(50% - var(--app-w) / 2); }
+  #sheet  { left: calc(50% - var(--app-w) / 2);      right: calc(50% - var(--app-w) / 2); }
+  #toasts { left: calc(50% - var(--app-w) / 2 + 16px); right: calc(50% - var(--app-w) / 2 + 16px); }
+
+  /* Mit der Maus gibt es kein :active-Feedback — dafür ein Überfahren. */
+  .row:hover, .sheet-actions button:hover { background: rgba(255,255,255,.05); }
+  .icon-btn:hover { background: rgba(255,255,255,.08); }
+}

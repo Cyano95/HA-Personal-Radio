@@ -14,6 +14,7 @@ Stream architecture (replaces per-file MP3 playback):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import pathlib
 import logging
 import os
@@ -93,11 +94,36 @@ FRONTEND_DIR = Path("/app/frontend")
 
 _INDEX_TEMPLATE: str | None = None
 
+# Stylesheet und Skript bekommen ein Kennzeichen aus ihrem eigenen Inhalt
+# angehängt: static/style.css?v=<kurzer Hash>.
+#
+# Ohne das zeigt der Browser — besonders die Home-Assistant-App — nach einem
+# Addon-Update die neue index.html mit dem alten, zwischengespeicherten CSS
+# und JavaScript. Die Oberfläche sieht dann kaputt aus, obwohl nichts kaputt
+# ist, und nur ein geleerter Cache hilft. Ändert sich eine Datei, ändert sich
+# ihr Kennzeichen und damit die Adresse — der alte Stand kann gar nicht mehr
+# ausgeliefert werden.
+_ASSETS = ("static/style.css", "static/app.js")
+
+
+def _asset_tag(rel: str) -> str:
+    """Kurzer Inhalts-Hash einer Datei; leer, wenn sie nicht lesbar ist."""
+    try:
+        data = (FRONTEND_DIR / rel.split("/", 1)[1]).read_bytes()
+    except OSError:
+        return ""
+    return hashlib.sha1(data).hexdigest()[:10]
+
 
 def _get_index_html() -> str:
     global _INDEX_TEMPLATE
     if _INDEX_TEMPLATE is None:
-        _INDEX_TEMPLATE = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+        html = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+        for rel in _ASSETS:
+            tag = _asset_tag(rel)
+            if tag:
+                html = html.replace(f'"{rel}"', f'"{rel}?v={tag}"')
+        _INDEX_TEMPLATE = html
     return _INDEX_TEMPLATE
 
 
@@ -110,11 +136,30 @@ async def index(request: Request):
         f'<head>\n  <base href="{base}" />',
         1,
     )
-    return HTMLResponse(html)
+    # Die Seite selbst darf nie aus dem Cache kommen: sie trägt die
+    # Kennzeichen der übrigen Dateien. Käme sie alt zurück, verwiese sie
+    # weiter auf den alten Stand.
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+class _VersionedStatic(StaticFiles):
+    """
+    Dateien mit ``?v=`` dürfen beliebig lange zwischengespeichert werden —
+    ändert sich ihr Inhalt, ändert sich die Adresse. Alles andere bleibt
+    kurzlebig, damit ein direkter Aufruf nicht festhängt.
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        if b"v=" in (scope or {}).get("query_string", b""):
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
 
 if FRONTEND_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+    app.mount("/static", _VersionedStatic(directory=str(FRONTEND_DIR)), name="static")
 
 
 # ---------------------------------------------------------------------------
